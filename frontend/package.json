@@ -27,7 +27,7 @@
     "react-calendar": "^5.1.0",
     "react-confirm-alert": "^3.0.6",
     "react-date-range": "^2.0.1",
-    "react-datepicker": "^6.1.0",
+    "react-datepicker": "^6.9.0",
     "react-datetime": "^3.2.0",
     "react-dom": "^18.2.0",
     "react-hot-toast": "^2.4.1",

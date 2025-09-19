@@ -35,7 +35,7 @@ const EmployeeDetails = () => {
                 const EmployeeDtls = response.data;
 
                 const safeEmployeeData = {
-                    userid: EmployeeDtls.userid || id, // Use userid from response, not _id
+                    userid: EmployeeDtls._id || id, // Backend returns _id, not userid
                     name: EmployeeDtls.name || '',
                     email: EmployeeDtls.email || '',
                     personal_email: EmployeeDtls.personal_email || '',
