@@ -27,7 +27,7 @@ import Leavehistory from "./components/Adminfrontend/Leave_History";
 import AddUser from "./components/Adminfrontend/new_employee";
 import TaskPage from "./components/Taskpage";
 import EmployeeDetails from "./components/EmployeeDetails";
-import TaskAssign from "./components/TaskAssign";
+// import TaskAssign from "./components/TaskAssign";
 import ViewAssignedTask from "./components/ViewAssignedTask";
 import TaskDetails from "./components/TaskDetails";
 import LoginPage from "./components/Loginpage";
@@ -36,6 +36,13 @@ import EnhancedNotificationDashboard from "./components/EnhancedNotificationDash
 import NotificationSystemTest from "./components/NotificationSystemTest";
 import ApiTest from "./components/ApiTest";
 import AdminAuth from "./Utils/AdminAuth";
+import TaskDetailsPage from "./components/TaskDetailsPage";
+import EmployeeTaskProgress from "./components/EmployeeTaskProgress";
+import ManagerTaskProgress from "./components/ManagerTaskProgress";
+import EmployeeTaskAssign from './components/EmployeeTaskAssign';
+import ManagerTaskAssign from './components/ManagerTaskAssign';
+import EmployeeprogressDetail from './components/EmployeeprogressDetail';
+import ManagerprogressDetail from './components/ManagerprogressDetail';
 
 
 
@@ -118,6 +125,10 @@ const router = createBrowserRouter([
         path: "task",
         element: <TaskPage />,
       },
+         {
+        path: "task/:taskId",
+        element: <TaskDetailsPage />,
+      },
       {
         path: "Leave",
         element: <Leave />,
@@ -175,14 +186,35 @@ const router = createBrowserRouter([
         path: "history",
         element: <Leavehistory />,
       },
-      {
-        path:":userid",
-        element:<TaskAssign />
-      },
+      // {
+      //   path:":userid",
+      //   element:<TaskAssign />
+      // },
       {
         path:"viewtask",
         element:<ViewAssignedTask />
-      }
+      },
+        {
+  path: "manager-employee",
+  element: <EmployeeTaskProgress/>,
+},
+{path:"/User/manager-task-detail/:taskId",
+  element:<EmployeeprogressDetail/>,
+},
+      {
+  path: "hr-manager",
+  element: <ManagerTaskProgress/>,
+},
+{path:"/User/hr-task-detail/:taskId",
+  element:<ManagerprogressDetail/>,
+},
+{path:"employee-task-assign", 
+  element:<EmployeeTaskAssign />
+},
+{path:"manager-task-assign", 
+  element:<ManagerTaskAssign />
+}
+
     ],
   },
   {

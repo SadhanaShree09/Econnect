@@ -220,6 +220,7 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout = () => {} }) => 
               </div>
             </Link>
 
+            {isDepart !== "HR" && (
             <Link to="todo" className="sidebar-item">
               <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
                 <svg
@@ -234,8 +235,9 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout = () => {} }) => 
                 <span className="font-medium">Task List</span>
               </div>
             </Link>
+            )}
 
-            <Link to={`${userid}`} className="sidebar-item">
+            {/* <Link to={`${userid}`} className="sidebar-item">
               <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
               <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -248,7 +250,7 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout = () => {} }) => 
                 </svg>
                 <span className="font-medium">Task Assign</span>
               </div>
-            </Link>
+            </Link> */}
 
             <Link to="notifications" className="sidebar-item">
               <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
@@ -271,6 +273,18 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout = () => {} }) => 
         {
           loggedIn && isManager=="Manager" ?(
           <>
+
+                <Link to="manager-employee" className="sidebar-item">
+              <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+                    stroke="currentColor" className="w-6 h-6 mr-3 text-white">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
+                        d="M6 3h12M6 7h12M6 11h12M6 15h12M6 19h12"/>
+                </svg>
+                <span className="font-medium">Employee Task Progress</span>
+              </div>
+            </Link>
+
             <Link to="LeaveManage" className="sidebar-item">
               <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
                 <svg
@@ -295,6 +309,18 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout = () => {} }) => 
           </>
           ): loggedIn && isDepart=="HR" && (
            <>
+
+           <Link to="hr-manager" className="sidebar-item">
+        <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+               stroke="currentColor" className="w-6 h-6 mr-3 text-white">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
+                  d="M6 3h12M6 7h12M6 11h12M6 15h12M6 19h12"/>
+          </svg>
+          <span className="font-medium">Manager Task Progress</span>
+        </div>
+      </Link>
+      
            <Link to="LeaveManage" className="sidebar-item">
               <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
                 <svg

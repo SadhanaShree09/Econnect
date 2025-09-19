@@ -2,7 +2,7 @@ from datetime import datetime
 import pytz
 import re
 from pydantic import BaseModel, validator, ValidationError
-from typing import Optional, List, Dict, Union
+from typing import Optional, List, Dict, Union, Any
 from datetime import date
 
 class Item(BaseModel):
@@ -215,11 +215,35 @@ class Item9(BaseModel):
                 raise ValueError('requestDate must be in YYYY-MM-DD format')
         return v
 
+class SubTask(BaseModel):
+    title: str
+    done: bool = False
+
+class Comment(BaseModel):
+    id: Union[int, str]
+    user: str
+    text: str
+    timestamp: str
+
+class FileRef(BaseModel):
+    id: str             # string id (uuid or stringified ObjectId)
+    name: str
+    size: int
+    type: str
+    uploadedAt: str
+    uploadedBy: Optional[str] = "Employee"
+    path: Optional[str] = None
+
 class Tasklist(BaseModel):
-    task: List
+    task: List[str]
     userid: str
     date:str
     due_date: str
+    assigned_by: str = "self" 
+    priority: str = "Medium" 
+    subtasks: List[SubTask] = []
+    comments: List[Comment] = []      
+    files: List[FileRef] = []
 
 class SingleTaskAssign(BaseModel):
     task: List
@@ -227,13 +251,22 @@ class SingleTaskAssign(BaseModel):
     due_date: str
     date:str
     TL: str
+    assigned_by: str  
+    priority: str = "Medium" 
+    subtasks: List[SubTask] = []
+    comments: List[Comment] = []      
+    files: List[FileRef] = [] 
 
 class Taskedit(BaseModel):
     userid: str
-    updated_task: Optional[str] = None
+    taskid: Union[str, int]
+    updated_task: Optional[Union[str, List[str]]] = None 
     status: Optional[str] = None
     due_date: Optional[str] = None
-    taskid: str
+    priority: Optional[str] = None 
+    subtasks: Optional[List[Any]] = [] 
+    comments: Optional[List[Any]] = [] 
+    files: Optional[List[Any]] = [] 
 
 class Gettasks(BaseModel):
     userid: str
