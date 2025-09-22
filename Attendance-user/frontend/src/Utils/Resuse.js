@@ -10,13 +10,14 @@
 
 import localstorageEncrypt from "localstorage-encrypt";
 import axios from "axios";
+var ip = import.meta.env.VITE_BACKEND_HOST 
+var host = import.meta.env.VITE_BACKEND_PORT 
 
-// Use the full API URL from environment or default to localhost:8000
-const API_BASE_URL = import.meta.env.VITE_HOST_IP || "http://127.0.0.1:8000";
-
-export const ipadr = API_BASE_URL;
-console.log("API Base URL:", API_BASE_URL); // Debugging step
-
+//export const ipadr=import.meta.env.VITE_HOST_IP;
+export const ipadr = import.meta.env.VITE_HOST_IP;
+console.log(import.meta.env.VITE_HOST_IP); // Debugging step
+console.log("j",import.meta.env.VITE_BACKEND_HOST)
+console.log("a",import.meta.env.VITE_BACKEND_PORT)
 export const LS = {
   save: (key, value) => localStorage.setItem(key, JSON.stringify(value)),
   get: (key) => {
@@ -31,6 +32,6 @@ export const LS = {
 };
 
 export const Baseaxios = axios.create({
-  baseURL: `${API_BASE_URL}/`,
+  baseURL: `${ip}:${host}/`,
   headers: { Authorization: `Bearer ${LS.get("access_token")}` },
 });

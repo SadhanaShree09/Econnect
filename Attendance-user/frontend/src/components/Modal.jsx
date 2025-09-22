@@ -47,5 +47,3 @@ export const Modal = ({ onSubmit, onCancel, closeModal, children }) => {
   
   );
 };
-
-export default Modal;

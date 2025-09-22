@@ -40,7 +40,8 @@ const ViewAssignedTask=()=>{
   );
 
   const paginate = (pageNumber) => setCurrentPage(pageNumber);
-  
+
+
      return(
          <div className="mr-8 p-10 bg-white min-h-96 lg:min-h-[90vh] w-full  shadow-black rounded-xl justify-center items-center relative jsonback  ml-10 rounded-md ">
                     <div className="">

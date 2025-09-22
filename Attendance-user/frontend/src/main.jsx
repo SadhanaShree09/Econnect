@@ -45,6 +45,19 @@ import EmployeeprogressDetail from './components/EmployeeprogressDetail';
 import ManagerprogressDetail from './components/ManagerprogressDetail';
 
 
+import Attendance from "./components/Adminfrontend/Attendance";
+import AddLeave from "./components/Adminfrontend/AddLeave";
+import AttendanceStats from "./components/AttendanceStats";
+import LeaveDetails from "./components/Adminfrontend/LeaveDetails";
+import RemoteDetails from "./components/Adminfrontend/RemoteDetails";
+
+// Create a simple dashboard home component for admin
+const DashboardHome = () => (
+  <div className="p-6">
+    <h1 className="text-2xl font-bold text-gray-800 mb-4">Admin Dashboard</h1>
+    <p className="text-gray-600">Welcome to the admin panel. Select an option from the sidebar to get started.</p>
+  </div>
+);
 
 const DashboardPage = () => (
   <Checkauth>
@@ -79,6 +92,13 @@ const router = createBrowserRouter([
   {
     path: "/",
     element: <App />,
+    children: [
+     { index: true, element: <LoginPage /> }, // 👈 default for "/"
+  ],
+  },
+  {
+    path: "/Login",
+    element: <LoginPage />,
   },
   {
     path: "/websocket-test",
@@ -91,22 +111,13 @@ const router = createBrowserRouter([
     path: "/User",
     element: <DashboardPage />,
     children: [
-      {
-        path: "",
-        element: <></>,
-      },
+      { path: "", element: <></> },
       {
         path: "Clockin_int",
         element: <Clockin_int />,
         children: [
-          {
-            path: "",
-            element: <Clockin />,
-          },
-          {
-            path: "Clockdashboard",
-            element: <Clockdashboard />,
-          },
+          { path: "", element: <Clockin /> },
+          { path: "Clockdashboard", element: <Clockdashboard /> },
         ],
       },
       {
@@ -164,57 +175,60 @@ const router = createBrowserRouter([
       {
         path: "test",
         element: <ApiTest />,
-      },
-      {
-        path: "LeaveManage",
-        element: <Leavemanagement />,
-      }
-      ,
-      {
-        path: "newUser",
-        element: <AddUser />,
-      },
-      {
-        path: "leaveapproval",
-        element: <Leaveapproval />,
-      },
-      {
-        path: "wfh",
-        element: <Wfh />,
-      },
-      {
-        path: "history",
-        element: <Leavehistory />,
-      },
-      // {
-      //   path:":userid",
-      //   element:<TaskAssign />
-      // },
-      {
-        path:"viewtask",
-        element:<ViewAssignedTask />
-      },
-        {
+},
+{
+  path: "LeaveManage",
+  element: <Leavemanagement />,
+},
+{
+  path: "newUser",
+  element: <AddUser />,
+},
+{
+  path: "leaveapproval",
+  element: <Leaveapproval />,
+},
+{
+  path: "wfh",
+  element: <Wfh />,
+},
+{
+  path: "history",
+  element: <Leavehistory />,
+},
+{
+  path:"viewtask",
+  element:<ViewAssignedTask />
+},
+{
   path: "manager-employee",
   element: <EmployeeTaskProgress/>,
 },
-{path:"/User/manager-task-detail/:taskId",
+{
+  path: "manager-task-detail/:taskId",
   element:<EmployeeprogressDetail/>,
 },
-      {
+{
   path: "hr-manager",
   element: <ManagerTaskProgress/>,
 },
-{path:"/User/hr-task-detail/:taskId",
+{
+  path: "hr-task-detail/:taskId",
   element:<ManagerprogressDetail/>,
 },
-{path:"employee-task-assign", 
+{
+  path:"employee-task-assign", 
   element:<EmployeeTaskAssign />
 },
-{path:"manager-task-assign", 
+{
+  path:"manager-task-assign", 
   element:<ManagerTaskAssign />
-}
-
+},
+{ path: "leave_details", element: <LeaveDetails /> },
+{ path: "wfh_details", element: <RemoteDetails />},
+{ path: "attendance", element: <Attendance />},
+{ path: "individualStats", element: <AttendanceStats />},
+{ path: ":userid", element: <TaskAssign /> },
     ],
   },
   {
@@ -288,12 +302,24 @@ const router = createBrowserRouter([
       {
         path:':id',
         element:<EmployeeDetails/>
-      }
-      
+      },
+      { index: true, element: <DashboardHome /> }, // default admin page
+      { path: "leave", element: <Leavemanagement /> },
+      { path: "time", element: <Timemanagement /> },
+      { path: "employee", element: <Employeelist /> },
+      { path: "employee/:id", element: <EmployeeDetails /> },
+      { path: "leaveapproval", element: <Leaveapproval /> },
+      { path: "leave_details", element: <LeaveDetails /> },
+      { path: "wfh", element: <Wfh /> },
+      { path: "wfh_details", element: <RemoteDetails />},
+      { path: "profile", element: <AdminProfile /> },
+      { path: "history", element: <Leavehistory /> },
+      { path: "attendance", element: <Attendance />},
+      { path: "newUser", element: <AddUser /> },
+      { path: "addLeave", element: <AddLeave /> },
     ],
-  },
+  }, // Fixed: Added missing comma here
 ]);
-
 
 const MainApp = () => {
   useEffect(() => {
@@ -308,7 +334,6 @@ const MainApp = () => {
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
-
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
@@ -329,6 +354,7 @@ const MainApp = () => {
 
     
   );
+  //return <RouterProvider router={router} />;
 };
 
 createRoot(document.getElementById("root")).render(<MainApp />);

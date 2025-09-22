@@ -10,6 +10,7 @@ from pymongo import MongoClient
 from dateutil import parser
 from bson import json_util
 from bson import ObjectId
+import os
 from datetime import datetime, date
 import bcrypt, requests, socket
 import pytz 
@@ -44,6 +45,23 @@ Tasks = db.tasks
 Managers = db.managers
 Notifications = db.notifications
 
+from typing import List, Dict
+from pymongo import MongoClient
+
+client = MongoClient("mongodb://localhost:27017")
+db = client["RBG_AI"]
+
+Users = db["Users"]
+Add = db.Dataset
+Leave = db.Leave_Details
+Clock = db.Attendance
+RemoteWork = db.RemoteWork
+admin = db.admin
+Tasks = db.tasks
+Managers = db.managers
+holidays_collection = db["holidays"]
+AttendanceStats = db["attendance_stats"]  # For caching calculated stats
+WorkingDays = db["working_days"]  # For storing yearly working days
 
 # Others
 def Adddata(data,id,filename):
@@ -182,8 +200,7 @@ def Gsignin(client_name, email):
     selected_date = date.today().strftime("%d-%m-%Y")
 
     if checkuser:
-        role = "admin" if checkuser.get("isadmin", False) else "user"
-        a = signJWT(str(checkuser['_id']))
+        a = signJWT(client_name)
         b = checkuser
         checkuser = cleanid(checkuser)
         checkuser.update(a)
@@ -209,7 +226,7 @@ def Gsignin(client_name, email):
         inserted_id = Users.insert_one(new_user).inserted_id
         user_doc = Users.find_one({"_id": inserted_id})
         user_doc = cleanid(user_doc)
-        jwt_token = signJWT(str(inserted_id))
+        jwt_token = signJWT(client_name)
         user_doc.update(jwt_token)
         return user_doc
 
@@ -573,23 +590,19 @@ def check_leave_conflict(userid, selected_date):
     # Check for Single-Day Leave Conflict
     existing_single_leave = Leave.find_one(single_day_leave_filter)
     if existing_single_leave:
-        conflict_message = f"Conflict: {userid} already has {existing_single_leave['leaveType']} on {selected_date_dt}."
-        log_message(conflict_message)
-        print(conflict_message)
-        return conflict_message
+        log_message(f"Conflict: {userid} already has {existing_single_leave['leaveType']} on {selected_date_dt}.")
+        return f"Leave request conflicts with an existing {existing_single_leave['leaveType']} on {selected_date_dt}."
 
     # Check for Multi-Day Leave Conflict
     existing_wfh = RemoteWork.find_one(wfh)
     if existing_wfh:
-        conflict_message = f"Conflict: {userid} already has remote work from {existing_wfh['fromDate']} to {existing_wfh.get('toDate', selected_date_dt)}."
-        log_message(conflict_message)
-        return conflict_message
+        log_message(f"Conflict: {userid} already has remote work from {existing_wfh['fromDate']} to {existing_wfh.get('toDate', selected_date_dt)}.")
+        return f"Leave request conflicts with an existing remote work from {existing_wfh['fromDate']} to {existing_wfh.get('toDate', selected_date_dt)}."
     
     existing_lop = Leave.find_one(lop)
     if existing_lop:
-        conflict_message = f"Conflict: {userid} already has {existing_lop['leaveType']} from {existing_lop['selectedDate']} to {existing_lop.get('ToDate', selected_date_dt)}."
-        log_message(conflict_message)
-        return conflict_message
+        log_message(f"Conflict: {userid} already has {existing_lop['leaveType']} from {existing_lop['selectedDate']} to {existing_lop.get('ToDate', selected_date_dt)}.")
+        return f"Leave request conflicts with an existing {existing_lop['leaveType']} from {existing_lop['selectedDate']} to {existing_lop.get('ToDate', selected_date_dt)}."
 
     return None 
 
@@ -626,91 +639,87 @@ def check_multi_day_leave_conflict(userid, from_date, to_date):
 
 
 def store_leave_request(userid, employee_name, time, leave_type, selected_date, request_date, reason):
-    try:
-        # Ensure dates are stored as `datetime` objects
-        selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-        request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    # Ensure dates are stored as `datetime` objects
+    selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
-        # Check if the request date is a Sunday (weekday() returns 6 for Sunday)
-        if request_date_dt.weekday() == 6:
-            return "Request date is a Sunday. Request not allowed."
-        
-        if selected_date_dt.weekday() == 6:
-            return "Selected date is a Sunday. Request not allowed."
+    # Check if the request date is a Sunday (weekday() returns 6 for Sunday)
+    if request_date_dt.weekday() == 6:
+        return "Request date is a Sunday. Request not allowed."
+    
+    if selected_date_dt.weekday() == 6:
+        return "Selected date is a Sunday. Request not allowed."
 
-        if leave_type == "Sick Leave" and selected_date_dt != request_date_dt:
-            return "Sick Leave is permitted for today only."
-        
-        # Check for existing leave on the same date
-        conflict_result = check_leave_conflict(userid, selected_date_dt)
-        if conflict_result:
-            return conflict_result  # This returns the conflict message
+    if leave_type == "Sick Leave" and selected_date_dt != request_date_dt:
+        return "Sick Leave is permitted for today only."
+    
+    # Check for existing leave on the same date
+    if check_leave_conflict(userid, selected_date_dt):
+        return "Leave request conflicts with an existing leave or remote work."
 
-        combo_leave = Clock.find_one({"userid": userid, "bonus_leave": "Not Taken"})
-        if combo_leave:
-            return f"A combo leave is available for {combo_leave['date']}"
+    combo_leave = Clock.find_one({"userid": userid, "bonus_leave": "Not Taken"})
+    if combo_leave:
+        return f"A combo leave is available for {combo_leave['date']}"
 
-        if leave_type == "Casual Leave":
-            weekdays_count = count_weekdays(request_date_dt + timedelta(days=1), selected_date_dt)
-            if weekdays_count < 1:
-                return "Two days prior notice for Casual Leave."
+    if leave_type == "Casual Leave":
+        weekdays_count = count_weekdays(request_date_dt + timedelta(days=1), selected_date_dt)
+        if weekdays_count < 1:
+            return "Two days prior notice for Casual Leave."
 
-        if leave_type == "Casual Leave":
-            # Check if adjacent days have conflicts
-            if is_leave_taken(userid, selected_date_dt + timedelta(days=1), "Sick Leave"):
-                return "Casual Leave cannot be taken if the next day is Sick Leave."
+    if leave_type == "Casual Leave":
+        # Check if adjacent days have conflicts
+        if is_leave_taken(userid, selected_date_dt + timedelta(days=1), "Sick Leave"):
+            return "Casual Leave cannot be taken if the next day is Sick Leave."
 
-            if is_leave_taken(userid, selected_date_dt - timedelta(days=1), "Sick Leave"):
-                return "Casual Leave cannot be taken if the previous day is Sick Leave."
+        if is_leave_taken(userid, selected_date_dt - timedelta(days=1), "Sick Leave"):
+            return "Casual Leave cannot be taken if the previous day is Sick Leave."
 
-            if is_leave_taken(userid, selected_date_dt + timedelta(days=1), "Casual Leave"):
-                return "Casual Leave cannot be taken if the next day is also Casual Leave."
+        if is_leave_taken(userid, selected_date_dt + timedelta(days=1), "Casual Leave"):
+            return "Casual Leave cannot be taken if the next day is also Casual Leave."
 
-            if is_leave_taken(userid, selected_date_dt - timedelta(days=1), "Casual Leave"):
-                return "Casual Leave cannot be taken if the previous day is also Casual Leave."
+        if is_leave_taken(userid, selected_date_dt - timedelta(days=1), "Casual Leave"):
+            return "Casual Leave cannot be taken if the previous day is also Casual Leave."
 
-        # Count leaves for the user in the given month
-        current_month = selected_date_dt.strftime("%m-%Y")
-        leave_count_cursor = Leave.aggregate([
-            {
-                '$match': {
-                    'userid': userid,
-                    'selectedDate': {
-                        '$gte': datetime.strptime(f"01-{current_month}", "%d-%m-%Y"),
-                        '$lt': datetime.strptime(f"01-{current_month}", "%d-%m-%Y") + timedelta(days=31)
-                    },
-                    'leaveType': leave_type
-                }
-            },
-            {
-                '$group': {
-                    '_id': '$leaveType',
-                    'count': {'$sum': 1}
-                }
+    # Count leaves for the user in the given month
+    current_month = selected_date_dt.strftime("%m-%Y")
+    leave_count_cursor = Leave.aggregate([
+        {
+            '$match': {
+                'userid': userid,
+                'selectedDate': {
+                    '$gte': datetime.strptime(f"01-{current_month}", "%d-%m-%Y"),
+                    '$lt': datetime.strptime(f"01-{current_month}", "%d-%m-%Y") + timedelta(days=31)
+                },
+                'leaveType': leave_type
             }
-        ])
-
-        leave_count = list(leave_count_cursor)
-        if leave_count and leave_count[0]["count"] >= 1:
-            return f"You have already taken a {leave_type} this month."
-
-        employee_id = get_employee_id_from_db(employee_name)
-        new_leave = {
-            "userid": userid,
-            "Employee_ID": employee_id,
-            "employeeName": employee_name,
-            "time": time,
-            "leaveType": leave_type,
-            "selectedDate": selected_date_dt,  # Stored as `datetime` object
-            "requestDate": request_date_dt,  # Stored as `datetime` object
-            "reason": reason,
+        },
+        {
+            '$group': {
+                '_id': '$leaveType',
+                'count': {'$sum': 1}
+            }
         }
+    ])
 
-        result = Leave.insert_one(new_leave)
-        return "Leave request stored successfully"
-    except Exception as e:
-        print(f"Error in store_leave_request: {e}")
-        return f"Error processing leave request: {str(e)}"
+    leave_count = list(leave_count_cursor)
+    if leave_count and leave_count[0]["count"] >= 1:
+        return f"You have already taken a {leave_type} this month."
+
+    user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+    user_position = user_info.get("position", "User") if user_info else "User"
+
+    employee_id = get_employee_id_from_db(employee_name)
+    new_leave = {
+        "userid": userid,
+        "Employee_ID": employee_id,
+        "employeeName": employee_name,
+        "time": time,
+        "position": user_position,
+        "leaveType": leave_type,
+        "selectedDate": selected_date_dt,  # Stored as `datetime` object
+        "requestDate": request_date_dt,  # Stored as `datetime` object
+        "reason": reason,
+    }
 
     result = Leave.insert_one(new_leave)
     return "Leave request stored successfully"
@@ -750,22 +759,9 @@ def delete_leave(userid, fromdate, requestdate, leavetype):
         return "Invalid request"
 
 def store_sunday_request(userid, employee_name, time, leave_type, selected_date, reason, request_date):
-    # Convert string dates to datetime objects if needed
-    if isinstance(selected_date, str):
-        try:
-            selected_date_dt = datetime.strptime(selected_date, "%Y-%m-%d")
-        except ValueError:
-            selected_date_dt = datetime.strptime(selected_date, "%d-%m-%Y")
-    else:
-        selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-    
-    if isinstance(request_date, str):
-        try:
-            request_date_dt = datetime.strptime(request_date, "%Y-%m-%d")
-        except ValueError:
-            request_date_dt = datetime.strptime(request_date, "%d-%m-%Y")
-    else:
-        request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    # Convert to datetime objects
+    selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
     # Check if the request date is a Sunday
     if request_date_dt.weekday() == 6:
@@ -776,6 +772,10 @@ def store_sunday_request(userid, employee_name, time, leave_type, selected_date,
         return f"Leave request conflicts with an existing leave or remote work on {selected_date_dt.strftime('%d-%m-%Y')}."
 
     combo_leave = Clock.find_one({"userid": userid, "bonus_leave": "Not Taken"})
+
+    user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+    user_position = user_info.get("position", "User") if user_info else "User"
+
     employee_id = get_employee_id_from_db(employee_name)
 
     if combo_leave:
@@ -784,6 +784,7 @@ def store_sunday_request(userid, employee_name, time, leave_type, selected_date,
             "Employee_ID": employee_id,
             "employeeName": employee_name,
             "time": time,
+            "position": user_position,
             "leaveType": leave_type,
             "selectedDate": selected_date_dt,  # ✅ Stored as `datetime` object
             "requestDate": request_date_dt,  # ✅ Stored as `datetime` object
@@ -822,6 +823,284 @@ def get_user_leave_requests(selected_option):
             leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
 
     return leave_request
+
+# Admin Page Leave Requests
+# def get_manager_leave_requests(selected_option):
+#     managers = list(Users.find({"position": "Manager"}))
+#     print(f"Found {len(managers)} managers")
+
+
+def get_user_leave_requests_with_history(selected_option, show_processed=False):
+    """
+    Get leave requests with option to include processed ones
+    show_processed: False = only pending, True = only processed, None = all
+    """
+    if selected_option == "Leave":
+        base_filter = {"leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]}}
+    elif selected_option == "LOP":
+        base_filter = {"leaveType": "Other Leave"}
+    elif selected_option == "Permission":
+        base_filter = {"leaveType": "Permission"}
+    else:
+        return []
+    
+    # Add status filter based on show_processed parameter
+    if show_processed is False:  # Only pending
+        base_filter["status"] = {"$exists": False}
+    elif show_processed is True:  # Only processed
+        base_filter["status"] = {"$exists": True}
+    # If show_processed is None, don't add status filter (show all)
+    
+    leave_request = list(Leave.find(base_filter))
+    
+    # Clean the IDs and format dates
+    for index, leave in enumerate(leave_request):
+        leave_request[index] = cleanid(leave)
+
+    for leave in leave_request:
+        if selected_option == "Leave" or selected_option == "Permission":
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+        else:
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            if "ToDate" in leave:
+                leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+
+    return leave_request
+
+def get_manager_leave_requests_with_history(selected_option, show_processed=False):
+    """Get manager/HR leave requests with history option"""
+    managers_and_hr = list(Users.find({"position": {"$in": ["Manager", "HR"]}}))
+    user_ids = [str(user["_id"]) for user in managers_and_hr]
+
+    if selected_option == "Leave":
+        base_filter = {
+            "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+            "userid": {"$in": user_ids}
+        }
+    elif selected_option == "LOP":
+        base_filter = {
+            "leaveType": "Other Leave",
+            "userid": {"$in": user_ids}
+        }
+    elif selected_option == "Permission":
+        base_filter = {
+            "leaveType": "Permission",
+            "userid": {"$in": user_ids}
+        }
+    else:
+        return []
+    
+    # Add status filter
+    if show_processed is False:  # Only pending
+        base_filter["status"] = {"$exists": False}
+    elif show_processed is True:  # Only processed
+        base_filter["status"] = {"$exists": True}
+    
+    leave_request = list(Leave.find(base_filter))
+    
+    # Process the results
+    for index, leave in enumerate(leave_request):
+        leave_request[index] = cleanid(leave)
+
+    for leave in leave_request:
+        if selected_option == "Leave" or selected_option == "Permission":
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+        else:
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            if "ToDate" in leave:
+                leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+
+    return leave_request
+
+def get_only_user_leave_requests_with_history(selected_option, TL_name, show_processed=False):
+    """Get user leave requests under TL with history option"""
+    users = list(Users.find({"position": {"$ne":"Manager"}, "name":{"$ne":TL_name}, "TL":TL_name}))
+    user_ids = [str(user["_id"]) for user in users]
+
+    if selected_option == "Leave":
+        base_filter = {
+            "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+            "userid": {"$in": user_ids}
+        }
+    elif selected_option == "LOP":
+        base_filter = {
+            "leaveType": "Other Leave",
+            "userid": {"$in": user_ids}
+        }
+    elif selected_option == "Permission":
+        base_filter = {
+            "leaveType": "Permission",
+            "userid": {"$in": user_ids}
+        }
+    else:
+        return []
+    
+    # Add status filter
+    if show_processed is False:  # Only pending
+        base_filter["status"] = {"$exists": False}
+    elif show_processed is True:  # Only processed
+        base_filter["status"] = {"$exists": True}
+    
+    leave_request = list(Leave.find(base_filter))
+    
+    # Clean the IDs for each leave request
+    for index, leave in enumerate(leave_request):
+        leave_request[index] = cleanid(leave)
+
+    for leave in leave_request:
+        if selected_option == "Leave" or selected_option == "Permission":
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+        else:
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            if "ToDate" in leave:
+                leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+    
+#     # Prepare a list of manager IDs
+#     manager_ids = [str(manager["_id"]) for manager in managers]
+#     print(f"Manager IDs: {manager_ids}")
+
+#     # Debug: Check what leave requests exist for managers
+#     all_manager_leaves = list(Leave.find({"userid": {"$in": manager_ids}}))
+#     print(f"Total manager leaves in DB: {len(all_manager_leaves)}")
+    
+#     # Check status values
+#     status_values = [leave.get("status") for leave in all_manager_leaves]
+#     print(f"Status values found: {set(status_values)}")
+
+#     if selected_option == "Leave":
+#         leave_request = list(Leave.find({
+#             "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+#             "status": {"$exists": False},
+#             "userid": {"$in": manager_ids}
+#         }))
+#         print(f"Found {len(leave_request)} leave requests with no status")
+        
+#         # Also check what would be found with different status conditions
+#         with_status = list(Leave.find({
+#             "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+#             "userid": {"$in": manager_ids}
+#         }))
+#         print(f"Total leave requests (any status): {len(with_status)}")
+        
+#     # ... rest of your conditions
+    
+#     return leave_request
+
+# Admin Page Leave Requests
+def get_manager_leave_requests(selected_option):
+    # Get Manager + HR IDs
+    managers_and_hr = list(Users.find({"position": {"$in": ["Manager", "HR"]}}))
+    user_ids = [str(user["_id"]) for user in managers_and_hr]
+
+
+    if selected_option == "Leave":
+        leave_request = list(Leave.find({
+            "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+            "status": {"$exists": False},
+            "userid": {"$in": user_ids}
+        }))
+    elif selected_option == "LOP":
+        leave_request = list(Leave.find({
+            "leaveType": "Other Leave",
+            "status": {"$exists": False},
+            "userid": {"$in": user_ids}
+        }))
+    elif selected_option == "Permission":
+        leave_request = list(Leave.find({
+            "leaveType": "Permission",
+            "status": {"$exists": False},
+            "userid": {"$in": user_ids}
+        }))
+    else:
+        leave_request = []
+    
+    # Process the results
+    for index, leave in enumerate(leave_request):
+        leave_request[index] = cleanid(leave)
+
+    for leave in leave_request:
+        if selected_option == "Leave" or selected_option == "Permission":
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+        else:
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+
+    return leave_request
+
+# Similar functions for Remote Work requests
+def get_remote_work_requests_with_history(show_processed=False):
+    """Get remote work requests with history option"""
+    base_filter = {}
+    
+    if show_processed is False:  # Only pending
+        base_filter = {"Recommendation":"Recommend", "status": {"$exists": False}}
+    elif show_processed is True:  # Only processed
+        base_filter = {"status": {"$exists": True}}
+    
+    list1 = list()
+    res = RemoteWork.find(base_filter)
+    
+    for user in res:
+        cleanid(user)
+        user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
+        user["toDate"] = user["toDate"].strftime("%d-%m-%Y")
+        user["requestDate"] = user["requestDate"].strftime("%d-%m-%Y")
+        list1.append(user)
+    return list1
+
+def get_admin_page_remote_work_requests_with_history(show_processed=False):
+    """Get admin page remote work requests with history"""
+    managers = list(Users.find({"$or":[{"position": "Manager"}, {"department": "HR"}]}))
+    manager_ids = [str(manager["_id"]) for manager in managers]
+    
+    base_filter = {"userid": {"$in":manager_ids}}
+    
+    if show_processed is False:  # Only pending
+        base_filter.update({"Recommendation": {"$exists":False}, "status": {"$exists":False}})
+    elif show_processed is True:  # Only processed
+        base_filter.update({"status": {"$exists":True}})
+    
+    list1 = list()
+    res = RemoteWork.find(base_filter)
+    
+    for user in res:
+        cleanid(user)
+        user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
+        user["toDate"] = user["toDate"].strftime("%d-%m-%Y")
+        user["requestDate"] = user["requestDate"].strftime("%d-%m-%Y")
+        list1.append(user)
+    return list1
+
+def get_TL_page_remote_work_requests_with_history(TL, show_processed=False):
+    """Get TL page remote work requests with history"""
+    users = list(Users.find({"TL":TL}))
+    users_ids = [str(user["_id"]) for user in users]
+    
+    base_filter = {"userid": {"$in":users_ids}}
+    
+    if show_processed is False:  # Only pending
+        base_filter.update({"status": {"$exists": False}, "Recommendation":{"$exists":False}})
+    elif show_processed is True:  # Only processed
+        base_filter.update({"status": {"$exists":True}})
+    
+    list1 = list()
+    res = RemoteWork.find(base_filter)
+    
+    for user in res:
+        cleanid(user)
+        user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
+        user["toDate"] = user["toDate"].strftime("%d-%m-%Y")
+        user["requestDate"] = user["requestDate"].strftime("%d-%m-%Y")
+        list1.append(user)
+    return list1
 
 # Admin Page Leave Requests
 # def get_manager_leave_requests(selected_option):
@@ -1204,30 +1483,10 @@ from fastapi import HTTPException
 
 def store_remote_work_request(userid, employeeName, time, from_date, to_date, request_date, reason, ip):
     try:
-        # Convert string dates to datetime objects if needed
-        if isinstance(from_date, str):
-            try:
-                from_date_dt = datetime.strptime(from_date, "%Y-%m-%d")
-            except ValueError:
-                from_date_dt = datetime.strptime(from_date, "%d-%m-%Y")
-        else:
-            from_date_dt = datetime.strptime(from_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-            
-        if isinstance(to_date, str):
-            try:
-                to_date_dt = datetime.strptime(to_date, "%Y-%m-%d")
-            except ValueError:
-                to_date_dt = datetime.strptime(to_date, "%d-%m-%Y")
-        else:
-            to_date_dt = datetime.strptime(to_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-            
-        if isinstance(request_date, str):
-            try:
-                request_date_dt = datetime.strptime(request_date, "%Y-%m-%d")
-            except ValueError:
-                request_date_dt = datetime.strptime(request_date, "%d-%m-%Y")
-        else:
-            request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+        # Convert input strings to datetime objects
+        from_date_dt = datetime.strptime(from_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+        to_date_dt = datetime.strptime(to_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+        request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
         print(f"Storing remote work request for {employeeName}, UserID: {userid}...")
         print(f"Request Date: {request_date_dt}, From Date: {from_date_dt}, To Date: {to_date_dt}")
@@ -1249,6 +1508,9 @@ def store_remote_work_request(userid, employeeName, time, from_date, to_date, re
         num_weekdays_from_to = count_weekdays(from_date_dt, to_date_dt)
         future_days = (to_date_dt - from_date_dt).days
 
+        user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+        user_position = user_info.get("position", "User") if user_info else "User"
+
         print(f"Weekdays from request to start: {num_weekdays_request_to_from}, Future days: {future_days}")
 
         # Fetch Employee ID
@@ -1264,26 +1526,16 @@ def store_remote_work_request(userid, employeeName, time, from_date, to_date, re
                     "employeeID": employee_id,
                     "employeeName": employeeName,
                     "time": time,
+                    "position": user_position,
                     "fromDate": from_date_dt,  # ✅ Stored as `datetime` object
                     "toDate": to_date_dt,  # ✅ Stored as `datetime` object
                     "requestDate": request_date_dt,  # ✅ Stored as `datetime` object
                     "reason": reason,
                     "ip":ip,
-                    "status": "Pending",  # Add default status
-                    "created_at": get_current_timestamp_iso()  # Add timestamp
                 }
                 result = RemoteWork.insert_one(new_request)
-                wfh_id = str(result.inserted_id)
-                print("Insert result:", wfh_id)
-                
-                # Return success with WFH ID for notifications
-                return {
-                    "success": True,
-                    "message": "Remote work request stored successfully.",
-                    "wfh_id": wfh_id,
-                    "from_date": from_date_dt.strftime("%Y-%m-%d"),
-                    "to_date": to_date_dt.strftime("%Y-%m-%d")
-                }
+                print("Insert result:", result.inserted_id)
+                return "Remote work request stored successfully."
             else:
                 return "Remote work can be taken for a maximum of 3 days."
         else:
@@ -1325,10 +1577,8 @@ def get_admin_page_remote_work_requests():
     # Prepare a list of manager IDs
     manager_ids = [str(manager["_id"]) for manager in managers]
     list1 = list()
-    # Fixed query: Show manager WFH requests with status "Pending" that need admin approval
-    res = RemoteWork.find({"userid": {"$in":manager_ids}, "status": "Pending"})
-    print(f"Admin page WFH query result: {list(res)}")
-    res = RemoteWork.find({"userid": {"$in":manager_ids}, "status": "Pending"})  # Re-query due to cursor exhaustion
+    res = RemoteWork.find({"userid": {"$in":manager_ids}, "Recommendation": {"$exists":False}, "status": {"$exists":False}})
+    print(res)
     for user in res:
         cleanid(user)
         user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
@@ -1344,10 +1594,8 @@ def get_TL_page_remote_work_requests(TL):
     # Prepare a list of user IDs under this TL
     users_ids = [str(user["_id"]) for user in users]
     list1 = list()
-    # Show employee WFH requests that are pending manager approval (status "Pending" and no recommendation)
-    res = RemoteWork.find({"userid": {"$in":users_ids}, "status": "Pending", "Recommendation":{"$exists":False}})
-    print(f"TL WFH query result: {list(res)}")
-    res = RemoteWork.find({"userid": {"$in":users_ids}, "status": "Pending", "Recommendation":{"$exists":False}})  # Re-query due to cursor exhaustion
+    res = RemoteWork.find({"userid": {"$in":users_ids}, "status": {"$exists": False}, "Recommendation":{"$exists":False}})
+    print(res)
     for user in res:
         cleanid(user)
         user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
@@ -1386,6 +1634,7 @@ def update_remote_work_request_status_in_mongo(userid, status, wfh_id):
                 {"$set": {"status": status}, "$unset": {"Recommendation": ""}}
             )
         
+        result = RemoteWork.update_one({"_id":ObjectId(wfh_id), "userid": userid, "status":None, "Recommendation": "Recommend"}, {"$set": {"status": status}, "$unset": { "Recommendation": ""}})
         if result.modified_count > 0:
             print(f"✅ WFH status updated successfully to {status}")
             return True
@@ -1419,30 +1668,9 @@ def update_remote_work_request_recommend_in_mongo(userid, status, wfh_id):
 
 
 def store_Other_leave_request(userid, employee_name, time, leave_type, selected_date, To_date, request_date, reason):
-    # Convert string dates to datetime objects if needed
-    if isinstance(selected_date, str):
-        try:
-            selected_date = datetime.strptime(selected_date, "%Y-%m-%d")
-        except ValueError:
-            selected_date = datetime.strptime(selected_date, "%d-%m-%Y")
-    else:
-        selected_date = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-        
-    if isinstance(To_date, str):
-        try:
-            To_date = datetime.strptime(To_date, "%Y-%m-%d")
-        except ValueError:
-            To_date = datetime.strptime(To_date, "%d-%m-%Y")
-    else:
-        To_date = datetime.strptime(To_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-        
-    if isinstance(request_date, str):
-        try:
-            request_date = datetime.strptime(request_date, "%Y-%m-%d")
-        except ValueError:
-            request_date = datetime.strptime(request_date, "%d-%m-%Y")
-    else:
-        request_date = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    selected_date = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    To_date = datetime.strptime(To_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    request_date = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
     if request_date.weekday() == 6:
         return "Request date is a Sunday. Request not allowed."
@@ -1462,6 +1690,9 @@ def store_Other_leave_request(userid, employee_name, time, leave_type, selected_
         num_weekdays_from_to = count_weekdays(selected_date, To_date)
         
         future_days = (To_date - selected_date).days
+
+        user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+        user_position = user_info.get("position", "User") if user_info else "User"
         
         employee_id = get_employee_id_from_db(employee_name)
          
@@ -1471,6 +1702,7 @@ def store_Other_leave_request(userid, employee_name, time, leave_type, selected_
                 "Employee_ID": employee_id, 
                 "employeeName": employee_name,
                 "time": time,
+                "position": user_position,
                 "leaveType": leave_type,
                 "selectedDate": selected_date,
                 "ToDate" : To_date,
@@ -1487,22 +1719,9 @@ def store_Other_leave_request(userid, employee_name, time, leave_type, selected_
 
 
 def store_Permission_request(userid, employee_name, time, leave_type, selected_date, request_date, Time_Slot, reason):
-    # Convert string dates to datetime objects if needed
-    if isinstance(selected_date, str):
-        try:
-            selected_date_dt = datetime.strptime(selected_date, "%Y-%m-%d")
-        except ValueError:
-            selected_date_dt = datetime.strptime(selected_date, "%d-%m-%Y")
-    else:
-        selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-        
-    if isinstance(request_date, str):
-        try:
-            request_date_dt = datetime.strptime(request_date, "%Y-%m-%d")
-        except ValueError:
-            request_date_dt = datetime.strptime(request_date, "%d-%m-%Y")
-    else:
-        request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    # Convert to datetime objects
+    selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
     # Check for existing leave conflicts
     if check_leave_conflict(userid, selected_date_dt):
@@ -1518,11 +1737,15 @@ def store_Permission_request(userid, employee_name, time, leave_type, selected_d
 
     employee_id = get_employee_id_from_db(employee_name)
 
+    user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+    user_position = user_info.get("position", "User") if user_info else "User"
+
     new_leave = {
         "userid": userid,
         "Employee_ID": employee_id,
         "employeeName": employee_name,
         "time": time,
+        "position": user_position,
         "leaveType": leave_type,
         "selectedDate": selected_date_dt,  # ✅ Stored as `datetime` object
         "requestDate": request_date_dt,  # ✅ Stored as `datetime` object
@@ -1597,6 +1820,18 @@ def get_all_users():
 def get_admin_info(email):
     admin_info = admin.find_one({'email':email}, {"password":0})
     return admin_info
+
+# def add_task_list(tasks, userid: str, today, due_date):
+#     for task in tasks:
+#         t = {
+#             "task": task,
+#             "status": "Not completed",
+#             "date": today,
+#             "due_date": due_date,
+#             "userid": userid,
+#         }
+#         result = Tasks.insert_one(t)
+#     return "Task added Successfully"
 
 def iso_today():
     return datetime.now().strftime("%Y-%m-%d")
@@ -1726,10 +1961,14 @@ def add_file_to_task(taskid: str, file_data: dict):
 
 
 def get_task_file_metadata(taskid: str, fileid: str):
+    """
+    Return the metadata dict for a single file inside task.files[].
+    Returns None if not found.
+    """
     try:
         task = Tasks.find_one(
             {"_id": ObjectId(taskid), "files.id": fileid},
-            {"files.$": 1} 
+            {"files.$": 1}  # project only the matching file element
         )
         if not task or "files" not in task:
             return None
@@ -1748,7 +1987,11 @@ def delete_a_task(taskid):
     except Exception as e:
         return f"Error: {str(e)}"
 
+def get_the_tasks(userid: str, date: str = None):
+    query = {"userid": userid}
 
+    if date:
+        query["date"] = date  
 
 def get_the_tasks(userid: str, date: str = None):
     query = {"userid": userid}
@@ -1986,8 +2229,6 @@ def edit_an_employee(employee_data):
         for field in required_fields:
             if not employee_data.get(field):
                 raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
-        
-        # Clean the data - remove empty education and skills entries
         clean_education = [
             edu for edu in employee_data.get('education', []) 
             if edu.get('degree') or edu.get('institution') or edu.get('year')
@@ -2257,7 +2498,7 @@ def get_manager_hr_assigned_tasks(userid: str, date: str = None):
     return task_list
 
 def get_hr_self_assigned_tasks(userid: str, date: str = None):
-    # HR should only see tasks they assigned to themselves
+    # HR should see their self-assigned tasks
     query = {"userid": userid, "assigned_by": "self"}
     if date:
         query["date"] = date  
@@ -2265,7 +2506,6 @@ def get_hr_self_assigned_tasks(userid: str, date: str = None):
     tasks = list(Tasks.find(query))
     task_list = []
     for task in tasks:
-        # Handle files consistently - convert _id to id
         files = []
         for file in task.get("files", []):
             if isinstance(file, dict) and '_id' in file:
