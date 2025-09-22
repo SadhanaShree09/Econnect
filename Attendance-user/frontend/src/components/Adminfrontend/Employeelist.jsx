@@ -2,6 +2,9 @@ import React, { useState, useEffect } from "react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faSearch, faDownload } from "@fortawesome/free-solid-svg-icons";
 import axios from "axios";
+import * as XLSX from "xlsx";
+import { Link,Outlet } from "react-router-dom";
+
 
 const EmployeeList = () => {
     const [employeeData, setEmployeeData] = useState([]);
@@ -10,12 +13,15 @@ const EmployeeList = () => {
     const [searchTerm, setSearchTerm] = useState("");
     const [currentPage, setCurrentPage] = useState(1);
     const [itemsPerPage, setItemsPerPage] = useState(5);
+    const [show, setShow] = useState(false);
 
+    
+    const ip = import.meta.env.VITE_HOST_IP;
     useEffect(() => {
         const fetchData = async () => {
             try {
                 setLoading(true);
-                const response = await axios.get("http://127.0.0.1:8000/get_all_users");
+                const response = await axios.get(`${ip}/get_all_users`);
                 const filteredData =
                     response.data && Array.isArray(response.data)
                         ? response.data.filter((item) =>
@@ -93,6 +99,9 @@ const EmployeeList = () => {
                                         <th scope="col" className="p-2 whitespace-nowrap">
                                             <div className="font-semibold text-center">Status</div>
                                         </th>
+                                        <th scope="col" className="p-2 whitespace-nowrap">
+                                            <div className="font-semibold text-center">Action</div>
+                                        </th>
                                     </tr>
                                 </thead>
 
@@ -141,6 +150,17 @@ const EmployeeList = () => {
                                                         {row.status || "N/A"}
                                                     </div>
                                                 </td>
+                                                <td scope="col" className="p-2 whitespace-nowrap">
+                                                    <div className="font-medium text-center">
+                                                       <Link to={`/admin/${row.id}`}>
+                                                                 <div className="">
+                                                                 <button className="bg-blue-500 hover:bg-blue-400 hover:text-slate-900 text-white text-sm font-inter px-4 py-2 rounded-full shadow-lg">
+                                                                     Details
+                                                                 </button>
+                                                                 </div>
+                                                         </Link>
+                                                    </div>
+                                                </td>
                                             </tr>
                                         ))
                                     ) : (
@@ -158,6 +178,22 @@ const EmployeeList = () => {
                     </div>
                 </div>
                 <div className="mt-2 flex justify-between items-center">
+                <div>
+                            <button
+                                            className="py-1 px-3 bg-blue-500 rounded-md text-white hover:bg-[#b7c6df80] hover:text-black  active:bg-white active:text-white mr-2"
+                                            onClick={() => paginate(currentPage - 1)}
+                                            disabled={currentPage === 1}
+                                        >
+                                            Previous
+                                        </button>
+                                        <button
+                                            className="py-1 px-3 bg-blue-500 rounded-md text-white hover:bg-[#b7c6df80] hover:text-black  active:bg-white active:text-white"
+                                            onClick={() => paginate(currentPage + 1)}
+                                            disabled={indexOfLastItem >= employeeData.length}
+                                        >
+                                            Next
+                                        </button>
+                </div>
                     <div className="text-sm font-semibold text-gray-800">
                         Page {employeeData.length > 0 ? currentPage : 0} of{" "}
                         {employeeData.length > 0

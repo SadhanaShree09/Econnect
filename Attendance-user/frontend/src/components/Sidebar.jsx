@@ -5,6 +5,7 @@ import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import { FiLogOut, FiUser } from "react-icons/fi";
 import { LS } from "../Utils/Resuse";
+import NotificationBell from "./NotificationBell";
 
 // Modal component
 const Modal = ({ show, onClose, onConfirm, message }) => {
@@ -34,18 +35,29 @@ const Modal = ({ show, onClose, onConfirm, message }) => {
   );
 };
 
-const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout }) => {
+const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout = () => {} }) => {
   const navigate = useNavigate(); // Declare navigate only once
   const [showLogoutModal, setShowLogoutModal] = useState(false);
 
   const handleLogoutConfirm = () => {
+    // Clear all localStorage data
+    LS.remove("isloggedin");
+    LS.remove("access_token");
+    LS.remove("userid");
+    LS.remove("name");
+    LS.remove("isadmin");
+    LS.remove("position");
+    LS.remove("department");
+    
     toast.success("Successfully logged out!", {
       position: "top-right",
       autoClose: 1000,
       onClose: () => {
         navigate("/"); // Redirect after logout
         setShowLogoutModal(false);
-        onLogout();
+        if (onLogout && typeof onLogout === 'function') {
+          onLogout();
+        }
       },
     });
   };
@@ -62,11 +74,14 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout }) => {
   const isManager=LS.get("position");
   const isDepart=LS.get("department");
 
+  const userid=LS.get('userid');
+
   return (
     <div className="flex flex-col min-h-screen w-64 bg-blue-600 text-white shadow-lg border-r">
       {/* Logo Section */}
-      <div className="p-4 border-b-2 border-white border-purple-900 flex items-center justify-center">
+      <div className="p-4 border-b-2 border-white border-purple-900 flex items-center justify-between">
         <img src={Headlogo} alt="Logo" className="h-16" />
+        <NotificationBell className="mr-2" />
       </div>
 
       {/* Links Section */}
@@ -151,6 +166,21 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout }) => {
                 <span className="font-medium">Add Employee</span>
               </div>
             </Link>
+
+            <Link to="notifications" className="sidebar-item">
+              <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  className="w-6 h-6 mr-3 text-white"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 17h5l-5 5v-5zM20.61 10.83l-1.44-1.44a3 3 0 00-4.24 0l-5 5-1.39-1.39a1 1 0 00-1.42 0l-4.24 4.24a1 1 0 000 1.42l1.44 1.44a1 1 0 001.42 0L9 16.83l1.39 1.39a3 3 0 004.24 0l5-5a1 1 0 000-1.39z" />
+                </svg>
+                <span className="font-medium">Notifications</span>
+              </div>
+            </Link>
           </>
         ) : loggedIn && !isAdmin && (
           <>
@@ -204,6 +234,36 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout }) => {
                 <span className="font-medium">Task List</span>
               </div>
             </Link>
+
+            <Link to={`${userid}`} className="sidebar-item">
+              <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
+              <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  className="w-6 h-6 mr-3 text-white"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 3h12M6 7h12M6 11h12M6 15h12M6 19h12" />
+                </svg>
+                <span className="font-medium">Task Assign</span>
+              </div>
+            </Link>
+
+            <Link to="notifications" className="sidebar-item">
+              <div className="flex items-center p-4 hover:bg-blue-700 transition-colors">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  className="w-6 h-6 mr-3 text-white"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 17h5l-5 5v-5zM20.61 10.83l-1.44-1.44a3 3 0 00-4.24 0l-5 5-1.39-1.39a1 1 0 00-1.42 0l-4.24 4.24a1 1 0 000 1.42l1.44 1.44a1 1 0 001.42 0L9 16.83l1.39 1.39a3 3 0 004.24 0l5-5a1 1 0 000-1.39z" />
+                </svg>
+                <span className="font-medium">Notifications</span>
+              </div>
+            </Link>
           </>
         )
         }
@@ -230,6 +290,8 @@ const Sidebar = ({ userPicture, userName, isLoggedIn, onLogout }) => {
                 <span className="font-medium">Employee Leave Management</span>
               </div>
             </Link>
+
+           
           </>
           ): loggedIn && isDepart=="HR" && (
            <>

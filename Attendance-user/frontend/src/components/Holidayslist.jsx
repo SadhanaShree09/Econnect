@@ -16,13 +16,17 @@ const Holidayslist = () => {
     { date: 'Saturday, 12 Oct', name: 'Vijaya Dasami' },
     { date: 'Thursday, 31 Oct', name: 'Diwali' },
   ];
+  
+//| Variable     | What's inside?                  |
+//| ------------ | ------------------------------- |
+//| `firstHalf`  | First 5 holidays (`0 to 4`)     |
+//| `secondHalf` | Remaining holidays (`5 to end`) |
 
   const firstHalf = holidays.slice(0, 5);
   const secondHalf = holidays.slice(5);
 
   return (
-    
-      
+
       <div className="mr-8 p-10 bg-white min-h-96 lg:min-h-[90vh] w-full  shadow-black rounded-xl justify-center items-center relative jsonback ml-10 rounded-md">
       <h1 className="text-5xl font-semibold font-poppins pb-4 text-transparent bg-gradient-to-r from-zinc-600 to-zinc-950 bg-clip-text border-b-2">
           Leave Management
@@ -46,7 +50,8 @@ const Holidayslist = () => {
             <div className="holiday-list-container" >
               {firstHalf.map((holiday, index) => (
                 <p key={index} className="bg-gradient-to-r from-white to-blue-100 border-x rounded-lg shadow-md p-2 my-3 text-gray-800 font-poppins px-6">
-                  <span className="text-sm font-normal mr-1">{holiday.date}</span> <span className="text-sm font-bold">{holiday.name}</span>
+                  <span className="text-sm font-normal mr-1">{holiday.date}</span> 
+                  <span className="text-sm font-bold">{holiday.name}</span>
                 </p>
               ))}
             </div>
@@ -64,7 +69,8 @@ const Holidayslist = () => {
           </div>
         </div>
 
-        <p className='text-sm font-poppins text-gray-800 italic pt-2'><span className='font-semibold'>Note: </span>(G) - Gazetted Holiday</p>
+        <p className='text-sm font-poppins text-gray-800 italic pt-2'>
+        <span className='font-semibold'>Note: </span>(G) - Gazetted Holiday</p>
       </div>
     
   );
