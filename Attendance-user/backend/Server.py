@@ -1,4 +1,4 @@
-from Mongo import Otherleave_History_Details,Permission_History_Details, Users,admin,normal_leave_details,store_Other_leave_request,get_approved_leave_history,get_remote_work_requests,attendance_details,leave_History_Details,Remote_History_Details,get_attendance_by_date,update_remote_work_request_status_in_mongo,updated_user_leave_requests_status_in_mongo,get_user_leave_requests, get_employee_id_from_db,store_Permission_request, get_all_users, get_admin_info, add_task_list, edit_the_task, delete_a_task, get_the_tasks, delete_leave, get_user_info, store_sunday_request, get_admin_info, add_an_employee, PreviousDayClockout, auto_clockout, leave_update_notification, recommend_manager_leave_requests_status_in_mongo, get_manager_leave_requests, get_only_user_leave_requests, get_admin_page_remote_work_requests, update_remote_work_request_recommend_in_mongo, get_TL_page_remote_work_requests, users_leave_recommend_notification, managers_leave_recommend_notification,auto_approve_manager_leaves,edit_an_employee,get_managers,task_assign_to_multiple_users, get_team_members, manager_task_assignment, get_local_ip, get_public_ip, assigned_task, get_single_task, create_notification, get_notifications, mark_notification_read, mark_all_notifications_read, get_unread_notification_count, delete_notification, get_notifications_by_type, create_task_notification, create_leave_notification, create_wfh_notification, create_system_notification, create_attendance_notification, notify_leave_submitted, notify_leave_approved, notify_leave_rejected, notify_leave_recommended, notify_wfh_submitted, notify_wfh_approved, notify_wfh_rejected, store_leave_request, store_remote_work_request, get_admin_user_ids, get_hr_user_ids, get_user_position, notify_admin_manager_leave_request, notify_hr_recommended_leave, notify_hr_pending_leaves, notify_admin_pending_leaves, get_current_timestamp_iso, Notifications
+from Mongo import Otherleave_History_Details,Permission_History_Details, Users,admin,normal_leave_details,store_Other_leave_request,get_approved_leave_history,get_remote_work_requests,attendance_details,leave_History_Details,Remote_History_Details,get_attendance_by_date,update_remote_work_request_status_in_mongo,updated_user_leave_requests_status_in_mongo,get_user_leave_requests, get_employee_id_from_db,store_Permission_request, get_all_users, get_admin_info, add_task_list, edit_the_task, delete_a_task, get_the_tasks, delete_leave, get_user_info, store_sunday_request, get_admin_info, add_an_employee, PreviousDayClockout, auto_clockout, leave_update_notification, recommend_manager_leave_requests_status_in_mongo, get_manager_leave_requests, get_only_user_leave_requests, get_admin_page_remote_work_requests, update_remote_work_request_recommend_in_mongo, get_TL_page_remote_work_requests, users_leave_recommend_notification, managers_leave_recommend_notification,auto_approve_manager_leaves,edit_an_employee,get_managers,task_assign_to_multiple_users, get_team_members, manager_task_assignment, get_local_ip, get_public_ip, assigned_task, get_single_task, get_user_by_position, get_hr_assigned_tasks, get_manager_hr_assigned_tasks, get_hr_self_assigned_tasks, create_notification, get_notifications, mark_notification_read, mark_all_notifications_read, get_unread_notification_count, delete_notification, get_notifications_by_type, create_task_notification, create_leave_notification, create_wfh_notification, create_system_notification, create_attendance_notification, notify_leave_submitted, notify_leave_approved, notify_leave_rejected, notify_leave_recommended, notify_wfh_submitted, notify_wfh_approved, notify_wfh_rejected, store_leave_request, store_remote_work_request, get_admin_user_ids, get_hr_user_ids, get_user_position, notify_admin_manager_leave_request, notify_hr_recommended_leave, notify_hr_pending_leaves, notify_admin_pending_leaves, get_current_timestamp_iso, Notifications
 from model import Item4,Item,Item2,Item3,Csvadd,Csvedit,Csvdel,CT,Item5,Item6,Item9,RemoteWorkRequest,Item7,Item8, Tasklist, Taskedit, Deletetask, Gettasks, DeleteLeave, Item9, AddEmployee,EditEmployee,Taskassign, SingleTaskAssign, NotificationModel, NotificationUpdate, NotificationFilter
 from fastapi import FastAPI, HTTPException,Path,Query, HTTPException,Form, Request, WebSocket, WebSocketDisconnect
 from websocket_manager import notification_manager
@@ -20,6 +20,15 @@ import pytz
 import os
 import asyncio
 from typing import List
+from fastapi import UploadFile, File
+from fastapi.responses import FileResponse
+import uuid, os
+from datetime import datetime
+from bson import ObjectId
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
 origins = [
@@ -1432,147 +1441,241 @@ async def get_all_users_route():
         else:
             raise HTTPException(status_code=404, detail="No users found")
 
+# @app.post("/add_task")
+# async def add_task(item:Tasklist):
+#     try:
+#         # Parse the date to ensure it's in the correct format
+#         parsed_date = datetime.strptime(item.date, "%Y-%m-%d").strftime("%d-%m-%Y")
+#         due_date = datetime.strptime(item.due_date, "%Y-%m-%d").strftime("%d-%m-%Y")
+#     except ValueError:
+#         raise HTTPException(status_code=400, detail="Invalid date format. Use dd-mm-yyyy.")
+    
+#     result = add_task_list(item.task, item.userid, parsed_date, due_date)
+    
+#     # Enhanced notification for task assignment
+#     if result:
+#         task_titles = ", ".join(item.task) if isinstance(item.task, list) else str(item.task)
+        
+#         # Create self-assignment notification (user creating their own task)
+#         await Mongo.create_task_created_notification(
+#             userid=item.userid,
+#             task_title=task_titles,
+#             creator_name="You",  # Self-created
+#             due_date=due_date,
+#             priority="medium"
+#         )
+        
+#         # Also create assignment notification for consistency
+#         await Mongo.create_task_assignment_notification(
+#             userid=item.userid,
+#             task_title=task_titles,
+#             assigner_name="Admin",  # Since this is admin task assignment
+#             due_date=due_date,
+#             priority="high"
+#         )
+    
+#     return result
+
 @app.post("/add_task")
-async def add_task(item:Tasklist):
+async def add_task(item: Tasklist):
     try:
-        # Parse the date to ensure it's in the correct format
-        parsed_date = datetime.strptime(item.date, "%Y-%m-%d").strftime("%d-%m-%Y")
-        due_date = datetime.strptime(item.due_date, "%Y-%m-%d").strftime("%d-%m-%Y")
+        # ✅ just validate, don't reformat
+        datetime.strptime(item.date, "%Y-%m-%d")
+        datetime.strptime(item.due_date, "%Y-%m-%d")
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use dd-mm-yyyy.")
+        raise HTTPException(status_code=400, detail="Invalid date format. Use yyyy-mm-dd.")
+
+    # ✅ pass raw, let add_task_list handle formatting
+    result = add_task_list(item.task, item.userid, item.date, item.due_date, assigned_by="self", priority=item.priority, subtasks=[subtask.dict() for subtask in item.subtasks])
+    return {"task_id": result, "message": "Task added successfully"}
+
+# @app.post("/manager_task_assign")
+# async def task_assign(item:SingleTaskAssign):
+#     # Parse the date to ensure it's in the correct format
+#     parsed_date = datetime.strptime(item.date, "%Y-%m-%d").strftime("%d-%m-%Y")
+#     due_date = datetime.strptime(item.due_date, "%Y-%m-%d").strftime("%d-%m-%Y")
+#     result = manager_task_assignment(item.task, item.userid, item.TL, parsed_date, due_date)
     
-    result = add_task_list(item.task, item.userid, parsed_date, due_date)
-    
-    # Enhanced notification for task assignment
-    if result:
-        task_titles = ", ".join(item.task) if isinstance(item.task, list) else str(item.task)
+#     # Enhanced notification for manager task assignment
+#     if result:
+#         task_titles = ", ".join(item.task) if isinstance(item.task, list) else str(item.task)
         
-        # Create self-assignment notification (user creating their own task)
-        await Mongo.create_task_created_notification(
-            userid=item.userid,
-            task_title=task_titles,
-            creator_name="You",  # Self-created
-            due_date=due_date,
-            priority="medium"
-        )
-        
-        # Also create assignment notification for consistency
-        await Mongo.create_task_assignment_notification(
-            userid=item.userid,
-            task_title=task_titles,
-            assigner_name="Admin",  # Since this is admin task assignment
-            due_date=due_date,
-            priority="high"
-        )
+#         # Use specific manager assignment notification
+#         await Mongo.create_task_manager_assigned_notification(
+#             userid=item.userid,
+#             task_title=task_titles,
+#             manager_name=item.TL,  # Manager/TL name
+#             task_id=result,
+#             due_date=due_date,
+#             priority="high"
+#         )
     
-    return result
+#     return result
 
 @app.post("/manager_task_assign")
 async def task_assign(item:SingleTaskAssign):
     # Parse the date to ensure it's in the correct format
     parsed_date = datetime.strptime(item.date, "%Y-%m-%d").strftime("%d-%m-%Y")
     due_date = datetime.strptime(item.due_date, "%Y-%m-%d").strftime("%d-%m-%Y")
-    result = manager_task_assignment(item.task, item.userid, item.TL, parsed_date, due_date)
-    
-    # Enhanced notification for manager task assignment
-    if result:
-        task_titles = ", ".join(item.task) if isinstance(item.task, list) else str(item.task)
-        
-        # Use specific manager assignment notification
-        await Mongo.create_task_manager_assigned_notification(
-            userid=item.userid,
-            task_title=task_titles,
-            manager_name=item.TL,  # Manager/TL name
-            task_id=result,
-            due_date=due_date,
-            priority="high"
-        )
-    
+    # result = manager_task_assignment(item.task, item.userid, item.TL, parsed_date, due_date)
+    result = manager_task_assignment(
+    item.task,
+    item.userid,
+    item.TL,
+    parsed_date,
+    due_date,
+    assigned_by=item.TL,  
+    priority=item.priority
+)
+
     return result
 
+from typing import Optional
+
+from datetime import datetime
+
+@app.get("/manager_tasks")
+def get_manager_tasks(manager_name: str, userid: Optional[str] = None):
+    try:
+        tasks = Mongo.assigned_task(manager_name, userid)
+        
+        for t in tasks:
+            # Attach employee name
+            user = Mongo.get_user_info(t["userid"])
+            if user:
+                t["employee_name"] = user.get("name", "Unknown")
+            
+            # ✅ Normalize created_date
+            if "created_date" not in t or not t["created_date"]:
+                raw_date = t.get("date")
+                if raw_date:
+                    try:
+                        # If it's in DD-MM-YYYY format
+                        parsed = datetime.strptime(raw_date, "%d-%m-%Y")
+                        t["created_date"] = parsed.strftime("%Y-%m-%d")  # ISO-like string
+                    except Exception:
+                        # fallback: keep original
+                        t["created_date"] = str(raw_date)
+
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# @app.put("/edit_task")
+# async def edit_task(item: Taskedit):
+#     today = datetime.today()
+#     formatted_date = today.strftime("%d-%m-%Y")
+    
+#     # Get current task details before updating
+#     current_task = Mongo.Tasks.find_one({"_id": ObjectId(item.taskid)})
+    
+#     # Track changes for detailed notifications
+#     changes = {}
+#     if current_task:
+#         if item.updated_task and item.updated_task != current_task.get("task"):
+#             changes["title_changed"] = True
+#             changes["old_title"] = current_task.get("task")
+#             changes["new_title"] = item.updated_task
+        
+#         if item.due_date and item.due_date != current_task.get("due_date"):
+#             changes["due_date_changed"] = True
+#             changes["old_due_date"] = current_task.get("due_date")
+#             changes["new_due_date"] = item.due_date
+        
+#         if item.status and item.status != current_task.get("status"):
+#             changes["status_changed"] = True
+#             changes["old_status"] = current_task.get("status")
+#             changes["new_status"] = item.status
+    
+#     result = edit_the_task(item.taskid, item.userid, formatted_date, item.due_date, item.updated_task, item.status)
+    
+#     # Enhanced notifications based on task updates
+#     if result:
+#         task_title = item.updated_task or current_task.get("task", "Task") if current_task else "Task"
+        
+#         # Check if task was marked as completed
+#         if item.status and item.status.lower() == "completed":
+#             # Get TL name from current task
+#             tl_name = current_task.get("TL") if current_task else None
+            
+#             # Notify manager/TL about task completion
+#             await Mongo.notify_task_completion(
+#                 userid=item.userid,
+#                 task_title=task_title,
+#                 task_id=item.taskid,
+#                 tl_name=tl_name
+#             )
+            
+#             # Create completion notification for user
+#             user = Mongo.Users.find_one({"_id": ObjectId(item.userid)}) if ObjectId.is_valid(item.userid) else None
+#             user_name = user.get("name", "User") if user else "User"
+            
+#             await Mongo.create_task_assignment_notification(
+#                 userid=item.userid,
+#                 task_title=f"✅ Task Completed: {task_title}",
+#                 assigner_name="System",
+#                 task_id=item.taskid,
+#                 priority="medium"
+#             )
+#         else:
+#             # Enhanced task update notification with detailed changes
+#             if changes:
+#                 await Mongo.create_task_updated_notification(
+#                     userid=item.userid,
+#                     task_title=task_title,
+#                     updater_name="You",  # Assuming user is updating their own task
+#                     changes=changes,
+#                     task_id=item.taskid,
+#                     priority="medium"
+#                 )
+#             else:
+#                 # Fallback for minor updates
+#                 action = "Updated"
+#                 if item.status:
+#                     action = f"Status changed to {item.status}"
+                
+#                 create_task_notification(
+#                     userid=item.userid,
+#                     task_title=task_title,
+#                     action=action,
+#                     task_id=item.taskid,
+#                     priority="medium"
+#                 )
+    
+#     return {"result": result}
 
 @app.put("/edit_task")
-async def edit_task(item: Taskedit):
-    today = datetime.today()
-    formatted_date = today.strftime("%d-%m-%Y")
-    
-    # Get current task details before updating
-    current_task = Mongo.Tasks.find_one({"_id": ObjectId(item.taskid)})
-    
-    # Track changes for detailed notifications
-    changes = {}
-    if current_task:
-        if item.updated_task and item.updated_task != current_task.get("task"):
-            changes["title_changed"] = True
-            changes["old_title"] = current_task.get("task")
-            changes["new_title"] = item.updated_task
+def edit_task(request: Taskedit):
+    try:
+        # Get current date for completed_date if status is being updated
+        current_date = datetime.now().strftime("%Y-%m-%d")
         
-        if item.due_date and item.due_date != current_task.get("due_date"):
-            changes["due_date_changed"] = True
-            changes["old_due_date"] = current_task.get("due_date")
-            changes["new_due_date"] = item.due_date
+        result = Mongo.edit_the_task(
+            taskid=str(request.taskid),  # Ensure taskid is string
+            userid=request.userid,
+            cdate=current_date,  # Pass the required cdate parameter
+            due_date=request.due_date,
+            updated_task=request.updated_task,
+            status=request.status,
+            priority=request.priority,
+            subtasks=request.subtasks,
+            comments=request.comments,
+            files=request.files
+        )
         
-        if item.status and item.status != current_task.get("status"):
-            changes["status_changed"] = True
-            changes["old_status"] = current_task.get("status")
-            changes["new_status"] = item.status
-    
-    result = edit_the_task(item.taskid, item.userid, formatted_date, item.due_date, item.updated_task, item.status)
-    
-    # Enhanced notifications based on task updates
-    if result:
-        task_title = item.updated_task or current_task.get("task", "Task") if current_task else "Task"
+        if result == "Task not found":
+            raise HTTPException(status_code=404, detail="Task not found")
+        elif result == "No fields to update":
+            raise HTTPException(status_code=400, detail="No fields to update")
         
-        # Check if task was marked as completed
-        if item.status and item.status.lower() == "completed":
-            # Get TL name from current task
-            tl_name = current_task.get("TL") if current_task else None
-            
-            # Notify manager/TL about task completion
-            await Mongo.notify_task_completion(
-                userid=item.userid,
-                task_title=task_title,
-                task_id=item.taskid,
-                tl_name=tl_name
-            )
-            
-            # Create completion notification for user
-            user = Mongo.Users.find_one({"_id": ObjectId(item.userid)}) if ObjectId.is_valid(item.userid) else None
-            user_name = user.get("name", "User") if user else "User"
-            
-            await Mongo.create_task_assignment_notification(
-                userid=item.userid,
-                task_title=f"✅ Task Completed: {task_title}",
-                assigner_name="System",
-                task_id=item.taskid,
-                priority="medium"
-            )
-        else:
-            # Enhanced task update notification with detailed changes
-            if changes:
-                await Mongo.create_task_updated_notification(
-                    userid=item.userid,
-                    task_title=task_title,
-                    updater_name="You",  # Assuming user is updating their own task
-                    changes=changes,
-                    task_id=item.taskid,
-                    priority="medium"
-                )
-            else:
-                # Fallback for minor updates
-                action = "Updated"
-                if item.status:
-                    action = f"Status changed to {item.status}"
-                
-                create_task_notification(
-                    userid=item.userid,
-                    task_title=task_title,
-                    action=action,
-                    task_id=item.taskid,
-                    priority="medium"
-                )
-    
-    return {"result": result}
+        return {"message": result}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.delete("/task_delete/{taskid}")
@@ -1659,20 +1762,70 @@ async def get_task_notification_stats(userid: str):
     result = delete_a_task(taskid)
     return {"result": result}
 
+
 @app.get("/get_tasks/{userid}")
 async def get_tasks(userid: str):
     result = get_the_tasks(userid)
     if not result:
         return {"message": "No tasks found for the given user"}
+
+    for t in result:
+        t["subtasks"] = t.get("subtasks", [])
+        t["comments"] = t.get("comments", [])   # NEW
+        t["files"] = t.get("files", [])         # NEW
+
     return result
 
 @app.get("/get_tasks/{userid}/{date}")
 async def get_tasks(userid: str, date: str):
     result = get_the_tasks(userid, date)
     if not result:
-        return {"message": "No tasks found for the given user/date"}
+        return {"message": "No tasks found for the given user in selected date"}
+
+    for t in result:
+        t["subtasks"] = t.get("subtasks", [])
+        t["comments"] = t.get("comments", [])   # NEW
+        t["files"] = t.get("files", [])         # NEW
+
     return result
 
+@app.get("/get_manager_tasks/{userid}")
+async def fetch_manager_tasks(userid: str, date: str = None):
+    try:
+        tasks = Mongo.get_manager_only_tasks(userid, date)
+        for t in tasks:
+            t["subtasks"] = t.get("subtasks", [])
+            t["comments"] = t.get("comments", [])   # NEW
+            t["files"] = t.get("files", [])         # NEW
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/get_manager")
+def get_manager():
+    try:
+        result = get_user_by_position("Manager")
+        if result:
+            return result
+        else:
+            raise HTTPException(status_code=404, detail="Manager not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/tasks/{taskid}")
+async def get_task(taskid: str):
+    task = get_single_task(taskid)   
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+@app.get("/get_hr_assigned_tasks/{hr_name}")
+def api_get_hr_assigned_tasks(hr_name: str, userid: str = None, date: str = None):
+    try:
+        tasks = get_hr_assigned_tasks(hr_name, userid, date)
+        return JSONResponse(content=tasks)
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.get("/get_single_task/{taskid}")
 async def get_task(taskid : str):
@@ -1680,6 +1833,70 @@ async def get_task(taskid : str):
     if not result:
         return {"message": "No tasks found for the given task id"}
     return result
+
+@app.post("/task/{taskid}/files")
+async def upload_task_file(
+    taskid: str,
+    file: UploadFile = File(...),
+    uploaded_by: str = Form(...)
+):
+    try:
+        file_id = str(uuid.uuid4())
+        file_ext = os.path.splitext(file.filename)[1]
+        stored_name = f"{file_id}{file_ext}"
+        file_path = os.path.join(UPLOAD_DIR, stored_name)
+
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        file_meta = {
+            "id": file_id,
+            "name": file.filename,         # original name
+            "stored_name": stored_name, 
+            "path": file_path,   # internal safe name
+            "size": os.path.getsize(file_path),
+            "type": file.content_type,
+            "uploadedAt": datetime.now().isoformat(),
+            "uploadedBy": uploaded_by,
+        }
+
+        ok = Mongo.add_file_to_task(taskid, file_meta)
+        if not ok:
+            os.remove(file_path)
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        return {"message": "File uploaded successfully", "file": file_meta}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+        
+    except Exception as e:
+        print(f"File upload error: {e}")  # DEBUG
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/task/{taskid}/files/{fileid}")
+async def get_task_file(taskid: str, fileid: str):
+    file_meta = Mongo.get_task_file_metadata(taskid, fileid)
+    if not file_meta:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Prefer new stored_name, fallback to old path
+    stored_name = file_meta.get("stored_name")
+    if stored_name:
+        file_path = os.path.join(UPLOAD_DIR, stored_name)
+    else:
+        file_path = file_meta.get("path")  # old records
+        if not file_path:
+            raise HTTPException(status_code=404, detail="Missing stored filename")
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    return FileResponse(
+        file_path,
+        filename=file_meta.get("name", os.path.basename(file_path)),
+        media_type=file_meta.get("type", "application/octet-stream"),
+    )
 
 
 # @app.get("/get_user/{userid}")
@@ -1691,22 +1908,14 @@ async def get_task(taskid : str):
 
 @app.get("/get_user/{userid}")
 def get_user(userid: str):
-    print("Searching user ID:", userid, "in collection:", Users.name)
-
     try:
-        obj_id = ObjectId(userid)
+        result = Users.find_one({"_id": ObjectId(userid)}, {"_id": 0, "password": 0})
+        if result:
+            return result
+        else:
+            return {"error": "User not found", "userid": userid}
     except Exception as e:
-        return JSONResponse(content={"error": f"Invalid ID format: {str(e)}", "userid": userid})
-
-    user = Users.find_one({"_id": obj_id}, {"password": 0})
-
-    if user:
-        # Convert ObjectId to string for JSON
-        user["_id"] = str(user["_id"])
-        return JSONResponse(content=user)
-    else:
-        print("User not found in collection!")
-        return JSONResponse(content={"error": "User not found", "userid": userid})
+        return {"error": f"Invalid ID format: {str(e)}", "userid": userid}
 
 # @app.put("/edit_employee")
 # def add_employee(item:EditEmployee):
@@ -1756,20 +1965,32 @@ def get_members(TL: str = Query(..., alias="TL")):
     return result
 
 @app.post("/task_assign_to_multiple_members") 
-async def task_assign(item: Taskassign):
+def task_assign(item: Taskassign):
     print(item.Task_details)
-    
-    # Get assigner name from the request or use default
-    assigner_name = item.assigner_name or "Manager"
-    
-    # Use the enhanced function with notifications
-    result = await Mongo.task_assign_to_multiple_users_with_notification(
-        task_details=item.Task_details,
-        assigner_name=assigner_name,
-        single_notification_per_user=item.single_notification_per_user
-    )
-    
+    # result = task_assign_to_multiple_users(item.Task_details)
+    for t in item.Task_details:
+        if "assigned_by" not in t:
+            t["assigned_by"] = t.get("TL", "Manager")
+
+    result = task_assign_to_multiple_users(item.Task_details)
+
     return {"inserted_ids": result}
+
+@app.get("/get_manager_hr_tasks/{userid}")
+async def fetch_manager_hr_tasks(userid: str, date: str = None):
+    try:
+        tasks = get_manager_hr_assigned_tasks(userid, date)
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/get_hr_self_tasks/{userid}")
+async def fetch_hr_self_tasks(userid: str, date: str = None):
+    try:
+        tasks = get_hr_self_assigned_tasks(userid, date)
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Debug endpoint to check recent notifications for a user
 @app.get("/debug/notifications/{userid}")

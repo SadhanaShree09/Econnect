@@ -15,6 +15,7 @@ import bcrypt, requests, socket
 import pytz 
 import json
 import traceback
+import os
 
 # Helper function for timezone-aware timestamps
 def get_current_timestamp_iso():
@@ -1597,17 +1598,26 @@ def get_admin_info(email):
     admin_info = admin.find_one({'email':email}, {"password":0})
     return admin_info
 
-def add_task_list(tasks, userid: str, today, due_date):
-    for task in tasks:
-        t = {
-            "task": task,
-            "status": "Not completed",
-            "date": today,
-            "due_date": due_date,
-            "userid": userid,
-        }
-        result = Tasks.insert_one(t)
-    return "Task added Successfully"
+def iso_today():
+    return datetime.now().strftime("%Y-%m-%d")
+
+def add_task_list(task, userid, date, due_date, assigned_by="self",priority="Medium", subtasks=None, comments=None,files=None):
+    task_entry = {
+        "task": task,
+        "status": "Not completed",
+        # ✅ format here
+        "date": datetime.strptime(date, "%Y-%m-%d").strftime("%d-%m-%Y"),
+        "due_date": datetime.strptime(due_date, "%Y-%m-%d").strftime("%y-%m-%d"),
+        "userid": userid,
+        # "assigned_by": assigned_by,
+        "assigned_by": assigned_by if assigned_by else "HR",
+        "priority":priority,
+        "subtasks": subtasks or [],
+        "comments": comments or [],           # NEW
+        "files": files or [],              # NEW
+}
+    result = Tasks.insert_one(task_entry)
+    return str(result.inserted_id)
 
 def manager_task_assignment(task:str, userid: str, TL, today, due_date):
     task = {
@@ -1621,8 +1631,20 @@ def manager_task_assignment(task:str, userid: str, TL, today, due_date):
     result = Tasks.insert_one(task)
     return str(result.inserted_id)
 
-def edit_the_task(taskid, userid, cdate, due_date, updated_task=None, status=None):
+def edit_the_task(
+    taskid,
+    userid,
+    cdate,
+    due_date,
+    updated_task=None,
+    status=None,
+    priority=None,
+    subtasks=None,
+    comments=None,
+    files=None
+):
     update_fields = {}
+
     if updated_task and updated_task != "string":
         update_fields["task"] = updated_task
     if status and status != "string":
@@ -1630,15 +1652,91 @@ def edit_the_task(taskid, userid, cdate, due_date, updated_task=None, status=Non
         update_fields["completed_date"] = cdate
     if due_date and due_date != "string":
         update_fields["due_date"] = due_date
+    if priority and priority != "string":
+        update_fields["priority"] = priority
 
+    # Handle subtasks
+    if subtasks is not None:
+        update_fields["subtasks"] = [
+            {
+                "id": s.get("id", int(datetime.now().timestamp())),
+                "text": s.get("text") or s.get("title", ""),
+                "completed": s.get("completed", s.get("done", False)),
+            }
+            for s in subtasks
+        ]
+
+    # Handle comments
+    if comments is not None:
+        update_fields["comments"] = comments
+
+    # Handle files safely (MERGE with existing DB)
+    if files is not None:
+        # Fetch existing task files
+        existing_task = Tasks.find_one({"_id": ObjectId(taskid)}, {"files": 1})
+        existing_files = {f["id"]: f for f in existing_task.get("files", [])}
+
+        normalized_files = []
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+
+            fid = f.get("id") or f.get("_id")
+            if not fid:
+                continue
+            fid = str(fid)
+
+            base = existing_files.get(fid, {})
+
+            file_entry = {
+                "id": fid,
+                "name": f.get("name", base.get("name", "")),
+                "stored_name": f.get("stored_name") or base.get("stored_name", ""),  # ✅ preserve
+                "path": f.get("path") or base.get("path", ""),                       # ✅ preserve
+                "size": int(f.get("size") or base.get("size", 0)),
+                "type": f.get("type") or base.get("type", ""),
+                "uploadedAt": f.get("uploadedAt") or base.get("uploadedAt") or datetime.utcnow().isoformat(),
+                "uploadedBy": f.get("uploadedBy") or base.get("uploadedBy", "Unknown"),
+            }
+            normalized_files.append(file_entry)
+
+        if normalized_files:
+            update_fields["files"] = normalized_files
+
+    # Update DB
     if update_fields:
-        result = Tasks.update_one({"_id": ObjectId(taskid), "userid": userid}, {"$set": update_fields})
-        if result.matched_count > 0:
-            return "Task updated successfully"
-        else:
-            return "Task not found"
+        result = Tasks.update_one(
+            {"_id": ObjectId(taskid), "userid": userid},
+            {"$set": update_fields}
+        )
+        return "Task updated successfully" if result.matched_count > 0 else "Task not found"
     else:
         return "No fields to update"
+    
+def add_file_to_task(taskid: str, file_data: dict):
+    try:
+        result = Tasks.update_one(
+            {"_id": ObjectId(taskid)},
+            {"$push": {"files": file_data}}
+        )
+        return result.modified_count > 0
+    except Exception as e:
+        print("Mongo.add_file_to_task error:", e)
+        return False
+
+
+def get_task_file_metadata(taskid: str, fileid: str):
+    try:
+        task = Tasks.find_one(
+            {"_id": ObjectId(taskid), "files.id": fileid},
+            {"files.$": 1} 
+        )
+        if not task or "files" not in task:
+            return None
+        return task["files"][0]
+    except Exception as e:
+        print("Mongo.get_task_file_metadata error:", e)
+        return None
 
 
 def delete_a_task(taskid):
@@ -1655,9 +1753,43 @@ def delete_a_task(taskid):
 def get_the_tasks(userid: str, date: str = None):
     query = {"userid": userid}
 
-    # If date filter is provided, add it to query
     if date:
         query["date"] = date  
+
+    tasks = list(Tasks.find(query))
+    task_list = []
+    for task in tasks:
+
+        files = []
+        for file in task.get("files", []):
+            if isinstance(file, dict) and '_id' in file:
+                file_copy = file.copy()
+                file_copy['id'] = str(file_copy['_id'])
+                del file_copy['_id']
+                files.append(file_copy)
+            else:
+                files.append(file)
+        task_data = {
+            "task": task.get("task"),
+            "status": task.get("status"),
+            "date": task.get("date"),
+            "due_date": task.get("due_date"),
+            "userid": task.get("userid"),
+            "assigned_by": task.get("assigned_by", "self"),
+            "priority": task.get("priority", "Medium"),
+            "subtasks": task.get("subtasks", []),   # ✅ ensure always list
+            "comments": task.get("comments", []),   # ✅ new
+            "files": files,    
+            "taskid": str(task.get("_id"))
+        }
+        task_list.append(task_data)
+
+    return task_list
+
+def get_assigned_tasks(manager_name: str, userid: str = None):
+    query = {"assigned_by": manager_name}
+    if userid:
+        query["userid"] = userid
 
     tasks = list(Tasks.find(query))
     task_list = []
@@ -1668,10 +1800,85 @@ def get_the_tasks(userid: str, date: str = None):
             "date": task.get("date"),
             "due_date": task.get("due_date"),
             "userid": task.get("userid"),
-            "taskid": str(task.get("_id"))  # ensure ObjectId → str
+            "assigned_by": task.get("assigned_by", "self"),
+            "priority": task.get("priority", "Medium"),
+            "subtasks": task.get("subtasks", []),  
+            "comments": task.get("comments", []),  
+            "files": task.get("files", []),      
+            "taskid": str(task.get("_id"))
         }
         task_list.append(task_data)
 
+    return task_list
+
+def get_manager_only_tasks(userid: str, date: str = None):
+    query = {"userid": userid, "assigned_by": {"$ne": "self"}}
+    if date:
+        query["date"] = date  
+
+    tasks = list(Tasks.find(query))
+    task_list = []
+    for task in tasks:
+        # Handle files consistently - convert _id to id
+        files = []
+        for file in task.get("files", []):
+            if isinstance(file, dict) and '_id' in file:
+                file_copy = file.copy()
+                file_copy['id'] = str(file_copy['_id'])
+                del file_copy['_id']
+                files.append(file_copy)
+            else:
+                files.append(file)
+                
+        task_data = {
+            "task": task.get("task"),
+            "status": task.get("status"),
+            "date": task.get("date"),
+            "due_date": task.get("due_date"),
+            "userid": task.get("userid"),
+            "assigned_by": task.get("assigned_by", "self"),
+            "priority": task.get("priority", "Medium"),
+            "subtasks": task.get("subtasks", []),
+            "comments": task.get("comments", []),
+            "files": files,  # Use processed files
+            "taskid": str(task.get("_id"))
+        }
+        task_list.append(task_data)
+
+    return task_list
+
+def get_assigned_tasks(manager_name: str, userid: str = None):
+    query = {"assigned_by": manager_name}
+    if userid:
+        query["userid"] = userid
+    tasks = list(Tasks.find(query))
+    task_list = []
+    for task in tasks:
+        # Handle files consistently - convert _id to id
+        files = []
+        for file in task.get("files", []):
+            if isinstance(file, dict) and '_id' in file:
+                file_copy = file.copy()
+                file_copy['id'] = str(file_copy['_id'])
+                del file_copy['_id']
+                files.append(file_copy)
+            else:
+                files.append(file)
+                
+        task_data = {
+            "task": task.get("task"),
+            "status": task.get("status"),
+            "date": task.get("date"),
+            "due_date": task.get("due_date"),
+            "userid": task.get("userid"),
+            "assigned_by": task.get("assigned_by", "self"),
+            "priority": task.get("priority", "Medium"),
+            "subtasks": task.get("subtasks", []),
+            "comments": task.get("comments", []),
+            "files": files,  # Use processed files
+            "taskid": str(task.get("_id"))
+        }
+        task_list.append(task_data)
     return task_list
 
 # def get_user_info(userid):
@@ -1836,15 +2043,19 @@ def task_assign_to_multiple_users(task_details):
     inserted_ids = []
     
     for item in task_details:
-        tasks = item.get("Tasks", [])  # Extracting tasks from Task_details
+        tasks = item.get("Tasks", [])
         for task in tasks:
             task_entry = {
-                "task": task,
+                "task": [task],
                 "status": "Not completed",
                 "date": datetime.strptime(item["date"], "%Y-%m-%d").strftime("%d-%m-%Y"),
                 "due_date": datetime.strptime(item["due_date"], "%Y-%m-%d").strftime("%d-%m-%Y"),
                 "userid": item["userid"],
-                "TL": item["TL"],
+                "assigned_by": item.get("assigned_by") or "HR",
+                "priority": item.get("priority", "Medium"),
+                "subtasks": item.get("subtasks", []),
+                "comments": item.get("comments", []), 
+                "files": item.get("files", []),                     
             }
             result = Tasks.insert_one(task_entry)
             inserted_ids.append(str(result.inserted_id))
@@ -1950,16 +2161,49 @@ async def task_assign_to_multiple_users_with_notification(task_details, assigner
 
 
 def get_single_task(taskid):
-    tasks = list(Tasks.find({"_id": ObjectId(taskid)}))
-    for task in tasks:
-        task["_id"] = str(task.get("_id"))
-    return tasks
+    try:
+        task = Tasks.find_one({"_id": ObjectId(taskid)})
+        if task:
+            task["_id"] = str(task.get("_id"))
+            return {"task": task}
+        else:
+            raise HTTPException(status_code=404, detail="Task not found")
+    except Exception as e:
+        print("Error in get_single_task:", e)
+        raise HTTPException(status_code=400, detail="Invalid task ID")
 
-def assigned_task(tl, userid=None):
+def assigned_task(manager_name, userid=None):
     if userid:
-        tasks = list(Tasks.find({"userid": userid, "TL":tl}))
+        tasks = list(Tasks.find({"userid": userid, "assigned_by": manager_name}))
     else:
-        tasks = list(Tasks.find({"TL":tl}))
+        tasks = list(Tasks.find({"assigned_by": manager_name}))
+    
+    task_list = []
+    for task in tasks:
+        task_data = {
+    "task": task.get("task"),
+    "status": task.get("status"),
+    "date": task.get("date"),
+    "due_date": task.get("due_date"),
+    "userid": task.get("userid"),
+    "assigned_by": task.get("assigned_by", "self"),
+    "priority": task.get("priority", "Medium"),
+    "subtasks": task.get("subtasks", []),
+    "comments": task.get("comments", []),
+    "files": task.get("files", []),
+    "taskid": str(task.get("_id"))
+}
+        task_list.append(task_data)  
+    return task_list
+
+def get_hr_assigned_tasks(hr_name: str, userid: str = None, date: str = None):
+    query = {"assigned_by": hr_name}
+    if userid:
+        query["userid"] = userid
+    if date:
+        query["date"] = date  
+
+    tasks = list(Tasks.find(query))
     task_list = []
     for task in tasks:
         task_data = {
@@ -1968,10 +2212,95 @@ def assigned_task(tl, userid=None):
             "date": task.get("date"),
             "due_date": task.get("due_date"),
             "userid": task.get("userid"),
+            "assigned_by": task.get("assigned_by", "self"),
+            "priority": task.get("priority", "Medium"),
             "taskid": str(task.get("_id"))
         }
-        task_list.append(task_data)  
+        task_list.append(task_data)
+
     return task_list
+def get_manager_hr_assigned_tasks(userid: str, date: str = None):
+    # Manager should only see tasks assigned by HR, not self-assigned
+    query = {"userid": userid, "assigned_by": {"$ne": "self"}}
+    if date:
+        query["date"] = date  
+
+    tasks = list(Tasks.find(query))
+    task_list = []
+    for task in tasks:
+        # Handle files consistently - convert _id to id
+        files = []
+        for file in task.get("files", []):
+            if isinstance(file, dict) and '_id' in file:
+                file_copy = file.copy()
+                file_copy['id'] = str(file_copy['_id'])
+                del file_copy['_id']
+                files.append(file_copy)
+            else:
+                files.append(file)
+                
+        task_data = {
+            "task": task.get("task"),
+            "status": task.get("status"),
+            "date": task.get("date"),
+            "due_date": task.get("due_date"),
+            "userid": task.get("userid"),
+            "assigned_by": task.get("assigned_by", "self"),
+            "priority": task.get("priority", "Medium"),
+            "subtasks": task.get("subtasks", []),
+            "comments": task.get("comments", []),
+            "files": files,
+            "taskid": str(task.get("_id"))
+        }
+        task_list.append(task_data)
+
+    return task_list
+
+def get_hr_self_assigned_tasks(userid: str, date: str = None):
+    # HR should only see tasks they assigned to themselves
+    query = {"userid": userid, "assigned_by": "self"}
+    if date:
+        query["date"] = date  
+
+    tasks = list(Tasks.find(query))
+    task_list = []
+    for task in tasks:
+        # Handle files consistently - convert _id to id
+        files = []
+        for file in task.get("files", []):
+            if isinstance(file, dict) and '_id' in file:
+                file_copy = file.copy()
+                file_copy['id'] = str(file_copy['_id'])
+                del file_copy['_id']
+                files.append(file_copy)
+            else:
+                files.append(file)
+                
+        task_data = {
+            "task": task.get("task"),
+            "status": task.get("status"),
+            "date": task.get("date"),
+            "due_date": task.get("due_date"),
+            "userid": task.get("userid"),
+            "assigned_by": task.get("assigned_by", "self"),
+            "priority": task.get("priority", "Medium"),
+            "subtasks": task.get("subtasks", []),
+            "comments": task.get("comments", []),
+            "files": files,
+            "taskid": str(task.get("_id"))
+        }
+        task_list.append(task_data)
+
+    return task_list
+
+def get_user_by_position(position):
+    user = Users.find_one({"position": position}, {"_id": 0, "password": 0})
+    if user:
+        # Add userid field for consistency with your frontend expectations
+        user_info = Users.find_one({"position": position})
+        if user_info:
+            user["userid"] = str(user_info["_id"])
+    return user
 
 def get_team_members(TL):
     team_members = list(Users.find({"TL":TL}, {"_id":0}))
