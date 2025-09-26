@@ -64,50 +64,12 @@ const remoteworkrequestapi = (newRequest) => {
 
   Baseaxios.post("/remote-work-request", payload)
   .then((response) => {
+    const { status, message } = response.data;
     console.log("API Response:", response.data);
-    const responseData = response.data;
-    
-    // Handle new structured response format
-    if (responseData.success !== undefined) {
-      if (responseData.success) {
-        // Successful submission
-        toast.success(responseData.message || "Remote work request submitted successfully!");
-        setTimeout(() => {
-          window.location.reload();
-        }, 2000);
-      } else if (responseData.status === "conflict") {
-        // Business logic conflict (not an error)
-        toast.warning(`📅 ${responseData.message}`, {
-          autoClose: 6000,
-          position: "top-center"
-        });
-        setTimeout(() => {
-          toast.info(`💡 ${responseData.suggestion}`, {
-            autoClose: 5000,
-            position: "top-center"
-          });
-        }, 1000);
-      } else if (responseData.status === "validation_error") {
-        // Validation error - show detailed error message
-        toast.error(`❌ ${responseData.details || responseData.message}`, {
-          autoClose: 5000,
-          position: "top-center"
-        });
-        setTimeout(() => {
-          toast.info(`💡 ${responseData.suggestion}`, {
-            autoClose: 4000,
-            position: "top-center"
-          });
-        }, 1000);
-      }
+    if (status === "success") {
+      toast.success(message || "Request submitted successfully!");
     } else {
-      // Handle legacy response format
-      const { status, message } = responseData;
-      if (status === "success") {
-        toast.success(message || "Request submitted successfully!");
-      } else {
-        toast.warning(message || "Something went wrong!");
-      }
+      toast.warning(message || "Something went wrong!");
     }
   })
   .catch((err) => {

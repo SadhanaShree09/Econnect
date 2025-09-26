@@ -251,9 +251,6 @@ function Clockin_int() {
             )}
           </div>
         </div>
-
-
-
         <Outlet />
       </div>
 

@@ -8,7 +8,7 @@ const ViewAssignedTask=()=>{
         const [error, setError] = useState(null);
         const [searchTerm, setSearchTerm] = useState("");
         const [currentPage, setCurrentPage] = useState(1);
-        const [itemsPerPage, zsetItemsPerPage] = useState(5);
+        const [itemsPerPage, setItemsPerPage] = useState(5);
 
      useEffect(()=>{
 

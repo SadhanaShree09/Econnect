@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { toast, ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import { ipadr } from "../../Utils/Resuse";
+import { LS } from "../../Utils/Resuse";
 
 const AddUser = () => {
   const [formData, setFormData] = useState({
@@ -23,6 +24,8 @@ const AddUser = () => {
   const [selectedValue, setSelectedValue] = useState("");
   const [options, setOptions] = useState([]);
   const [error, setError] = useState(null);
+  const Admin = LS.get('isadmin');
+  const Position = LS.get('position');
 
   // Fetch TL list
   useEffect(() => {
@@ -133,6 +136,7 @@ const AddUser = () => {
 
 
   return (
+    (Admin || Position === "HR") ?
     <div className="min-h-screen flex items-center justify-center">
       <ToastContainer />
       <form
@@ -351,7 +355,14 @@ const AddUser = () => {
           Add
         </button>
       </form>
-    </div>
+    </div> : (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="bg-red-100 border border-red-400 text-red-700 px-6 py-4 rounded-lg shadow-md">
+          <h1 className="text-xl font-semibold mb-2">Access Denied</h1>
+          <p>Only administrators and HR can access this page.</p>
+        </div>
+      </div>
+    )
   );
 };
 

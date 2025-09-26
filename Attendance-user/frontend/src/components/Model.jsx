@@ -39,5 +39,3 @@ export const Model = ({ onSubmit, onCancel, closeModal, children }) => {
     </div>
   );
 };
-
-export default Model;

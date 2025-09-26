@@ -1,9 +1,9 @@
 from datetime import datetime
 import pytz
 import re
-from pydantic import BaseModel, validator, ValidationError
-from typing import Optional, List, Dict, Union, Any
-from datetime import date
+from pydantic import BaseModel, validator, ValidationError,Field
+from typing import Any, Optional, List, Dict, Union
+from datetime import date,datetime
 
 class Item(BaseModel):
     email: str
@@ -102,118 +102,35 @@ class Item6(BaseModel):
     employeeName: str
     leaveType: str
     reason: str
-    selectedDate: Union[date, str]
-    requestDate: Union[date, str]
-    time: Optional[str] = None
-    status: Optional[str] = ""
-    
-    @validator('selectedDate', pre=True)
-    def parse_selected_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('selectedDate must be in YYYY-MM-DD format')
-        return v
-    
-    @validator('requestDate', pre=True)
-    def parse_request_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('requestDate must be in YYYY-MM-DD format')
-        return v 
+    selectedDate: date
+    requestDate: date 
 
 class Item7(BaseModel):
     userid: str
     employeeName: str
     leaveType: str
     reason: str
-    selectedDate: Union[date, str]
-    ToDate: Union[date, str]
-    requestDate: Union[date, str]
-    
-    @validator('selectedDate', pre=True)
-    def parse_selected_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('selectedDate must be in YYYY-MM-DD format')
-        return v
-    
-    @validator('ToDate', pre=True)
-    def parse_to_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('ToDate must be in YYYY-MM-DD format')
-        return v
-    
-    @validator('requestDate', pre=True)
-    def parse_request_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('requestDate must be in YYYY-MM-DD format')
-        return v
+    selectedDate: date
+    ToDate : date
+    requestDate: date
     
 class Item8(BaseModel):
     userid: str
     employeeName: str
     time: str
     leaveType: str
-    selectedDate: Union[date, str]
-    requestDate: Union[date, str]
-    timeSlot: str 
-    reason: str
-    
-    @validator('selectedDate', pre=True)
-    def parse_selected_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('selectedDate must be in YYYY-MM-DD format')
-        return v
-    
-    @validator('requestDate', pre=True)
-    def parse_request_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('requestDate must be in YYYY-MM-DD format')
-        return v   
+    selectedDate: date
+    requestDate: date
+    timeSlot :str 
+    reason: str   
 
 class Item9(BaseModel):
     userid: str
     employeeName: str
     leaveType: str
-    selectedDate: Union[date, str]
+    selectedDate: date
     reason: str
-    requestDate: Union[date, str]
-    
-    @validator('selectedDate', pre=True)
-    def parse_selected_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('selectedDate must be in YYYY-MM-DD format')
-        return v
-    
-    @validator('requestDate', pre=True)
-    def parse_request_date(cls, v):
-        if isinstance(v, str):
-            try:
-                return datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('requestDate must be in YYYY-MM-DD format')
-        return v
+    requestDate: date
 
 class SubTask(BaseModel):
     title: str
@@ -298,8 +215,8 @@ class AddEmployee(BaseModel):
     department: str
     address: str
     date_of_joining: str
-    education: List[Dict[str, Union[str,int]]]  # A list of educational qualifications
-    skills: List[Dict[str, Union[str, int]]]  # A list of skills with 'name' and 'level'
+    education: List[Dict[str, Union[str,int]]] 
+    skills: List[Dict[str, Union[str, int]]] 
     TL: str
     personal_email: str
     resume_link: str
@@ -316,7 +233,7 @@ class EditEmployee(BaseModel):
     position: str
     department: str
     address: str 
-    date_of_joining: str  # Changed from dateOfJoining
+    date_of_joining: str 
     education: List[Dict[str, Union[str, int]]]
     skills: List[Dict[str, Union[str, int]]]
     TL: str
@@ -335,7 +252,6 @@ class EditEmployee(BaseModel):
                 except (ValueError, TypeError):
                     skill['level'] = 0
         return v
-
 # class EditEmployee(BaseModel):
 #  userid: str
 #  name: str
@@ -353,11 +269,10 @@ class EditEmployee(BaseModel):
 #  ip:str
 
 
+# class Taskassign(BaseModel):
+#     Task_details: List[Dict[str, Union[str, int, List[str]]]]
 class Taskassign(BaseModel):
-    Task_details: List[Dict[str, Union[str, int, List[str]]]]
-    assigner_name: Optional[str] = None  # Name of the person assigning tasks
-    assigner_id: Optional[str] = None    # ID of the person assigning tasks
-    single_notification_per_user: Optional[bool] = True  # Send one notification per user instead of per task
+    Task_details: List[Dict[str, Any]]
     
 class Settings(BaseModel):
     authjwt_secret_key: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRfaWQiOiJhZG1pbl9pZCIsInJvbGUiOiJhZG1pbiIsImV4cGlyZXMiOjE3MDk3MTM2NjEuMjc5ODk4NH0.DwYyZBkO20Kicz5vvqxpCrxZ7279uHRlLttNDBVO-_E"
@@ -379,4 +294,95 @@ class NotificationFilter(BaseModel):
     type: Optional[str] = None
     is_read: Optional[bool] = None
 
+class Holiday(BaseModel):
+    date: str   # YYYY-MM-DD
+    name: str
 
+class HolidayYear(BaseModel):
+    year: int
+    holidays: List[Holiday]
+
+class AssignPayload(BaseModel):
+    task_id: str
+    assigned_to: str
+    tl: str
+    title: str
+
+
+# Message schema aligned with Chat.jsx
+class Message(BaseModel):
+    id: Optional[str] = None          # unique ID (MongoDB _id or frontend tempId)
+    tempId: Optional[str] = None      # temporary ID from frontend
+    type: str = "message"             # "message", "reaction", "thread"
+    from_user: str                    # sender userId
+    to_user: str                      # recipient userId
+    text: Optional[str] = None        # text message
+    file: Optional[str] = None        # file name if uploaded
+    chatId: str                       # deterministic chat id (userA_userB)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# Thread message schema (replies inside a thread)
+class ThreadMessage(BaseModel):
+    id: Optional[str] = None
+    tempId: Optional[str] = None
+    type: str = "thread"
+    rootId: str                       # parent message ID
+    from_user: str
+    to_user: str
+    text: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# Reaction schema
+class Reaction(BaseModel):
+    type: str = "reaction"
+    messageId: str                    # message being reacted to
+    emoji: str
+    user: str                         # who reacted
+    delta: Optional[int] = 1          # +1 or -1 for toggling
+
+
+# Chat history response
+class ChatHistoryResponse(BaseModel):
+    chatId: str
+    messages: List[Message]
+
+
+#  Online presence payload
+class PresencePayload(BaseModel):
+    type: str = "presence"
+    users: List[str]
+    
+class Settings(BaseModel):
+    authjwt_secret_key: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRfaWQiOiJhZG1pbl9pZCIsInJvbGUiOiJhZG1pbiIsImV4cGlyZXMiOjE3MDk3MTM2NjEuMjc5ODk4NH0.DwYyZBkO20Kicz5vvqxpCrxZ7279uHRlLttNDBVO-_E"
+    authjwt_algorithm: str = "HS256"
+
+
+# Assign Docs
+class AssignPayload(BaseModel):
+    docName: str
+    userIds: List[str]
+
+class ReviewPayload(BaseModel):
+    userId: str
+    docName: str
+    status: str  # "verified"
+    remarks: str = ""
+
+class ReviewDocument(BaseModel):
+    file_id: str
+    status: str
+    remarks: str = None
+
+class GroupCreate(BaseModel):
+    name: str
+    members: List[str]
+
+class GroupUpdate(BaseModel):
+    name: Optional[str]
+    members: Optional[List[str]]
+
+class UpdateGroupPayload(BaseModel):
+    name: str
+    members: list[str]

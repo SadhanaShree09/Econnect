@@ -10,12 +10,14 @@ from pymongo import MongoClient
 from dateutil import parser
 from bson import json_util
 from bson import ObjectId
+import os
 from datetime import datetime, date
 import bcrypt, requests, socket
 import pytz 
 import json
 import traceback
 import os
+from gridfs import GridFS
 
 # Helper function for timezone-aware timestamps
 def get_current_timestamp_iso():
@@ -31,20 +33,43 @@ def format_timestamp_iso(dt):
 
 from pymongo import MongoClient
 
-client = MongoClient("mongodb://localhost:27017")
+
+from typing import List, Dict
+from pymongo import MongoClient
+
+
+
+
+
+  # For storing yearly working days
+
+client= MongoClient("mongodb://localhost:27017")
 db = client["RBG_AI"]
+client=client.RBG_AI
+Users=client.Users
+Add=client.Dataset
+Leave=client.Leave_Details
+Clock=client.Attendance
+RemoteWork = client.RemoteWork
+admin = client.admin
+Tasks = client.tasks
+Managers = client.managers
+chats_collection = client.chat_app
+threads_collection = client.threads
+files_collection = client.files
+groups_collection = client.groups
+users_collection = client.users
+documents_collection = client.document
+assignments_collection = client.assignments
 
-Users = db["Users"]
-Add = db.Dataset
-Leave = db.Leave_Details
-Clock = db.Attendance
-RemoteWork = db.RemoteWork
-admin = db.admin
-Tasks = db.tasks
+
+messages_collection = client.messages
 Managers = db.managers
+holidays_collection = db["holidays"]
+AttendanceStats = db["attendance_stats"]  # For caching calculated stats
+WorkingDays = db["working_days"]
+
 Notifications = db.notifications
-
-
 # Others
 def Adddata(data,id,filename):
     a=Add.insert_one({'userid':id,'data':data,'filename':filename})
@@ -182,8 +207,7 @@ def Gsignin(client_name, email):
     selected_date = date.today().strftime("%d-%m-%Y")
 
     if checkuser:
-        role = "admin" if checkuser.get("isadmin", False) else "user"
-        a = signJWT(str(checkuser['_id']))
+        a = signJWT(client_name)
         b = checkuser
         checkuser = cleanid(checkuser)
         checkuser.update(a)
@@ -209,7 +233,7 @@ def Gsignin(client_name, email):
         inserted_id = Users.insert_one(new_user).inserted_id
         user_doc = Users.find_one({"_id": inserted_id})
         user_doc = cleanid(user_doc)
-        jwt_token = signJWT(str(inserted_id))
+        jwt_token = signJWT(client_name)
         user_doc.update(jwt_token)
         return user_doc
 
@@ -298,12 +322,10 @@ def Clockin(userid, name, time):
             Clock.insert_one(record)
 
         # Create attendance notification for successful clock-in
-        create_attendance_notification(
-            userid=userid,
-            message=f"Successfully clocked in at {time}. Status: {status}",
-            priority="low",
-            attendance_type="clock_in"
-        )
+            create_attendance_notification(userid=userid,
+                                            message=f"Successfully clocked in at {time}. Status: {status}",
+                                            priority="low",
+                                            attendance_type="clock_in")
 
         return "Clock-in successful"
 
@@ -424,14 +446,7 @@ def Clockout(userid, name, time):
             }}
         )
 
-        # Create attendance notification for successful clock-out
-        create_attendance_notification(
-            userid=userid,
-            message=f"Successfully clocked out at {clockout_time.strftime('%I:%M:%S %p')}. Total work time: {hours_text}",
-            priority="low",
-            attendance_type="clock_out"
-        )
-
+        # (Removed notification for successful clock-out)
         return "Clock-out sucessful"
     else:
         # No clock-in record found for today; prompt user to clock-in first
@@ -573,23 +588,19 @@ def check_leave_conflict(userid, selected_date):
     # Check for Single-Day Leave Conflict
     existing_single_leave = Leave.find_one(single_day_leave_filter)
     if existing_single_leave:
-        conflict_message = f"Conflict: {userid} already has {existing_single_leave['leaveType']} on {selected_date_dt}."
-        log_message(conflict_message)
-        print(conflict_message)
-        return conflict_message
+        log_message(f"Conflict: {userid} already has {existing_single_leave['leaveType']} on {selected_date_dt}.")
+        return f"Leave request conflicts with an existing {existing_single_leave['leaveType']} on {selected_date_dt}."
 
     # Check for Multi-Day Leave Conflict
     existing_wfh = RemoteWork.find_one(wfh)
     if existing_wfh:
-        conflict_message = f"Conflict: {userid} already has remote work from {existing_wfh['fromDate']} to {existing_wfh.get('toDate', selected_date_dt)}."
-        log_message(conflict_message)
-        return conflict_message
+        log_message(f"Conflict: {userid} already has remote work from {existing_wfh['fromDate']} to {existing_wfh.get('toDate', selected_date_dt)}.")
+        return f"Leave request conflicts with an existing remote work from {existing_wfh['fromDate']} to {existing_wfh.get('toDate', selected_date_dt)}."
     
     existing_lop = Leave.find_one(lop)
     if existing_lop:
-        conflict_message = f"Conflict: {userid} already has {existing_lop['leaveType']} from {existing_lop['selectedDate']} to {existing_lop.get('ToDate', selected_date_dt)}."
-        log_message(conflict_message)
-        return conflict_message
+        log_message(f"Conflict: {userid} already has {existing_lop['leaveType']} from {existing_lop['selectedDate']} to {existing_lop.get('ToDate', selected_date_dt)}.")
+        return f"Leave request conflicts with an existing {existing_lop['leaveType']} from {existing_lop['selectedDate']} to {existing_lop.get('ToDate', selected_date_dt)}."
 
     return None 
 
@@ -626,91 +637,87 @@ def check_multi_day_leave_conflict(userid, from_date, to_date):
 
 
 def store_leave_request(userid, employee_name, time, leave_type, selected_date, request_date, reason):
-    try:
-        # Ensure dates are stored as `datetime` objects
-        selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-        request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    # Ensure dates are stored as `datetime` objects
+    selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
-        # Check if the request date is a Sunday (weekday() returns 6 for Sunday)
-        if request_date_dt.weekday() == 6:
-            return "Request date is a Sunday. Request not allowed."
-        
-        if selected_date_dt.weekday() == 6:
-            return "Selected date is a Sunday. Request not allowed."
+    # Check if the request date is a Sunday (weekday() returns 6 for Sunday)
+    if request_date_dt.weekday() == 6:
+        return "Request date is a Sunday. Request not allowed."
+    
+    if selected_date_dt.weekday() == 6:
+        return "Selected date is a Sunday. Request not allowed."
 
-        if leave_type == "Sick Leave" and selected_date_dt != request_date_dt:
-            return "Sick Leave is permitted for today only."
-        
-        # Check for existing leave on the same date
-        conflict_result = check_leave_conflict(userid, selected_date_dt)
-        if conflict_result:
-            return conflict_result  # This returns the conflict message
+    if leave_type == "Sick Leave" and selected_date_dt != request_date_dt:
+        return "Sick Leave is permitted for today only."
+    
+    # Check for existing leave on the same date
+    if check_leave_conflict(userid, selected_date_dt):
+        return "Leave request conflicts with an existing leave or remote work."
 
-        combo_leave = Clock.find_one({"userid": userid, "bonus_leave": "Not Taken"})
-        if combo_leave:
-            return f"A combo leave is available for {combo_leave['date']}"
+    combo_leave = Clock.find_one({"userid": userid, "bonus_leave": "Not Taken"})
+    if combo_leave:
+        return f"A combo leave is available for {combo_leave['date']}"
 
-        if leave_type == "Casual Leave":
-            weekdays_count = count_weekdays(request_date_dt + timedelta(days=1), selected_date_dt)
-            if weekdays_count < 1:
-                return "Two days prior notice for Casual Leave."
+    if leave_type == "Casual Leave":
+        weekdays_count = count_weekdays(request_date_dt + timedelta(days=1), selected_date_dt)
+        if weekdays_count < 1:
+            return "Two days prior notice for Casual Leave."
 
-        if leave_type == "Casual Leave":
-            # Check if adjacent days have conflicts
-            if is_leave_taken(userid, selected_date_dt + timedelta(days=1), "Sick Leave"):
-                return "Casual Leave cannot be taken if the next day is Sick Leave."
+    if leave_type == "Casual Leave":
+        # Check if adjacent days have conflicts
+        if is_leave_taken(userid, selected_date_dt + timedelta(days=1), "Sick Leave"):
+            return "Casual Leave cannot be taken if the next day is Sick Leave."
 
-            if is_leave_taken(userid, selected_date_dt - timedelta(days=1), "Sick Leave"):
-                return "Casual Leave cannot be taken if the previous day is Sick Leave."
+        if is_leave_taken(userid, selected_date_dt - timedelta(days=1), "Sick Leave"):
+            return "Casual Leave cannot be taken if the previous day is Sick Leave."
 
-            if is_leave_taken(userid, selected_date_dt + timedelta(days=1), "Casual Leave"):
-                return "Casual Leave cannot be taken if the next day is also Casual Leave."
+        if is_leave_taken(userid, selected_date_dt + timedelta(days=1), "Casual Leave"):
+            return "Casual Leave cannot be taken if the next day is also Casual Leave."
 
-            if is_leave_taken(userid, selected_date_dt - timedelta(days=1), "Casual Leave"):
-                return "Casual Leave cannot be taken if the previous day is also Casual Leave."
+        if is_leave_taken(userid, selected_date_dt - timedelta(days=1), "Casual Leave"):
+            return "Casual Leave cannot be taken if the previous day is also Casual Leave."
 
-        # Count leaves for the user in the given month
-        current_month = selected_date_dt.strftime("%m-%Y")
-        leave_count_cursor = Leave.aggregate([
-            {
-                '$match': {
-                    'userid': userid,
-                    'selectedDate': {
-                        '$gte': datetime.strptime(f"01-{current_month}", "%d-%m-%Y"),
-                        '$lt': datetime.strptime(f"01-{current_month}", "%d-%m-%Y") + timedelta(days=31)
-                    },
-                    'leaveType': leave_type
-                }
-            },
-            {
-                '$group': {
-                    '_id': '$leaveType',
-                    'count': {'$sum': 1}
-                }
+    # Count leaves for the user in the given month
+    current_month = selected_date_dt.strftime("%m-%Y")
+    leave_count_cursor = Leave.aggregate([
+        {
+            '$match': {
+                'userid': userid,
+                'selectedDate': {
+                    '$gte': datetime.strptime(f"01-{current_month}", "%d-%m-%Y"),
+                    '$lt': datetime.strptime(f"01-{current_month}", "%d-%m-%Y") + timedelta(days=31)
+                },
+                'leaveType': leave_type
             }
-        ])
-
-        leave_count = list(leave_count_cursor)
-        if leave_count and leave_count[0]["count"] >= 1:
-            return f"You have already taken a {leave_type} this month."
-
-        employee_id = get_employee_id_from_db(employee_name)
-        new_leave = {
-            "userid": userid,
-            "Employee_ID": employee_id,
-            "employeeName": employee_name,
-            "time": time,
-            "leaveType": leave_type,
-            "selectedDate": selected_date_dt,  # Stored as `datetime` object
-            "requestDate": request_date_dt,  # Stored as `datetime` object
-            "reason": reason,
+        },
+        {
+            '$group': {
+                '_id': '$leaveType',
+                'count': {'$sum': 1}
+            }
         }
+    ])
 
-        result = Leave.insert_one(new_leave)
-        return "Leave request stored successfully"
-    except Exception as e:
-        print(f"Error in store_leave_request: {e}")
-        return f"Error processing leave request: {str(e)}"
+    leave_count = list(leave_count_cursor)
+    if leave_count and leave_count[0]["count"] >= 1:
+        return f"You have already taken a {leave_type} this month."
+
+    user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+    user_position = user_info.get("position", "User") if user_info else "User"
+
+    employee_id = get_employee_id_from_db(employee_name)
+    new_leave = {
+        "userid": userid,
+        "Employee_ID": employee_id,
+        "employeeName": employee_name,
+        "time": time,
+        "position": user_position,
+        "leaveType": leave_type,
+        "selectedDate": selected_date_dt,  # Stored as `datetime` object
+        "requestDate": request_date_dt,  # Stored as `datetime` object
+        "reason": reason,
+    }
 
     result = Leave.insert_one(new_leave)
     return "Leave request stored successfully"
@@ -750,22 +757,9 @@ def delete_leave(userid, fromdate, requestdate, leavetype):
         return "Invalid request"
 
 def store_sunday_request(userid, employee_name, time, leave_type, selected_date, reason, request_date):
-    # Convert string dates to datetime objects if needed
-    if isinstance(selected_date, str):
-        try:
-            selected_date_dt = datetime.strptime(selected_date, "%Y-%m-%d")
-        except ValueError:
-            selected_date_dt = datetime.strptime(selected_date, "%d-%m-%Y")
-    else:
-        selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-    
-    if isinstance(request_date, str):
-        try:
-            request_date_dt = datetime.strptime(request_date, "%Y-%m-%d")
-        except ValueError:
-            request_date_dt = datetime.strptime(request_date, "%d-%m-%Y")
-    else:
-        request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    # Convert to datetime objects
+    selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
     # Check if the request date is a Sunday
     if request_date_dt.weekday() == 6:
@@ -776,6 +770,10 @@ def store_sunday_request(userid, employee_name, time, leave_type, selected_date,
         return f"Leave request conflicts with an existing leave or remote work on {selected_date_dt.strftime('%d-%m-%Y')}."
 
     combo_leave = Clock.find_one({"userid": userid, "bonus_leave": "Not Taken"})
+
+    user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+    user_position = user_info.get("position", "User") if user_info else "User"
+
     employee_id = get_employee_id_from_db(employee_name)
 
     if combo_leave:
@@ -784,6 +782,7 @@ def store_sunday_request(userid, employee_name, time, leave_type, selected_date,
             "Employee_ID": employee_id,
             "employeeName": employee_name,
             "time": time,
+            "position": user_position,
             "leaveType": leave_type,
             "selectedDate": selected_date_dt,  # ✅ Stored as `datetime` object
             "requestDate": request_date_dt,  # ✅ Stored as `datetime` object
@@ -822,6 +821,284 @@ def get_user_leave_requests(selected_option):
             leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
 
     return leave_request
+
+# Admin Page Leave Requests
+# def get_manager_leave_requests(selected_option):
+#     managers = list(Users.find({"position": "Manager"}))
+#     print(f"Found {len(managers)} managers")
+
+
+def get_user_leave_requests_with_history(selected_option, show_processed=False):
+    """
+    Get leave requests with option to include processed ones
+    show_processed: False = only pending, True = only processed, None = all
+    """
+    if selected_option == "Leave":
+        base_filter = {"leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]}}
+    elif selected_option == "LOP":
+        base_filter = {"leaveType": "Other Leave"}
+    elif selected_option == "Permission":
+        base_filter = {"leaveType": "Permission"}
+    else:
+        return []
+    
+    # Add status filter based on show_processed parameter
+    if show_processed is False:  # Only pending
+        base_filter["status"] = {"$exists": False}
+    elif show_processed is True:  # Only processed
+        base_filter["status"] = {"$exists": True}
+    # If show_processed is None, don't add status filter (show all)
+    
+    leave_request = list(Leave.find(base_filter))
+    
+    # Clean the IDs and format dates
+    for index, leave in enumerate(leave_request):
+        leave_request[index] = cleanid(leave)
+
+    for leave in leave_request:
+        if selected_option == "Leave" or selected_option == "Permission":
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+        else:
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            if "ToDate" in leave:
+                leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+
+    return leave_request
+
+def get_manager_leave_requests_with_history(selected_option, show_processed=False):
+    """Get manager/HR leave requests with history option"""
+    managers_and_hr = list(Users.find({"position": {"$in": ["Manager", "HR"]}}))
+    user_ids = [str(user["_id"]) for user in managers_and_hr]
+
+    if selected_option == "Leave":
+        base_filter = {
+            "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+            "userid": {"$in": user_ids}
+        }
+    elif selected_option == "LOP":
+        base_filter = {
+            "leaveType": "Other Leave",
+            "userid": {"$in": user_ids}
+        }
+    elif selected_option == "Permission":
+        base_filter = {
+            "leaveType": "Permission",
+            "userid": {"$in": user_ids}
+        }
+    else:
+        return []
+    
+    # Add status filter
+    if show_processed is False:  # Only pending
+        base_filter["status"] = {"$exists": False}
+    elif show_processed is True:  # Only processed
+        base_filter["status"] = {"$exists": True}
+    
+    leave_request = list(Leave.find(base_filter))
+    
+    # Process the results
+    for index, leave in enumerate(leave_request):
+        leave_request[index] = cleanid(leave)
+
+    for leave in leave_request:
+        if selected_option == "Leave" or selected_option == "Permission":
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+        else:
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            if "ToDate" in leave:
+                leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+
+    return leave_request
+
+def get_only_user_leave_requests_with_history(selected_option, TL_name, show_processed=False):
+    """Get user leave requests under TL with history option"""
+    users = list(Users.find({"position": {"$ne":"Manager"}, "name":{"$ne":TL_name}, "TL":TL_name}))
+    user_ids = [str(user["_id"]) for user in users]
+
+    if selected_option == "Leave":
+        base_filter = {
+            "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+            "userid": {"$in": user_ids}
+        }
+    elif selected_option == "LOP":
+        base_filter = {
+            "leaveType": "Other Leave",
+            "userid": {"$in": user_ids}
+        }
+    elif selected_option == "Permission":
+        base_filter = {
+            "leaveType": "Permission",
+            "userid": {"$in": user_ids}
+        }
+    else:
+        return []
+    
+    # Add status filter
+    if show_processed is False:  # Only pending
+        base_filter["status"] = {"$exists": False}
+    elif show_processed is True:  # Only processed
+        base_filter["status"] = {"$exists": True}
+    
+    leave_request = list(Leave.find(base_filter))
+    
+    # Clean the IDs for each leave request
+    for index, leave in enumerate(leave_request):
+        leave_request[index] = cleanid(leave)
+
+    for leave in leave_request:
+        if selected_option == "Leave" or selected_option == "Permission":
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+        else:
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            if "ToDate" in leave:
+                leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+    
+#     # Prepare a list of manager IDs
+#     manager_ids = [str(manager["_id"]) for manager in managers]
+#     print(f"Manager IDs: {manager_ids}")
+
+#     # Debug: Check what leave requests exist for managers
+#     all_manager_leaves = list(Leave.find({"userid": {"$in": manager_ids}}))
+#     print(f"Total manager leaves in DB: {len(all_manager_leaves)}")
+    
+#     # Check status values
+#     status_values = [leave.get("status") for leave in all_manager_leaves]
+#     print(f"Status values found: {set(status_values)}")
+
+#     if selected_option == "Leave":
+#         leave_request = list(Leave.find({
+#             "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+#             "status": {"$exists": False},
+#             "userid": {"$in": manager_ids}
+#         }))
+#         print(f"Found {len(leave_request)} leave requests with no status")
+        
+#         # Also check what would be found with different status conditions
+#         with_status = list(Leave.find({
+#             "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+#             "userid": {"$in": manager_ids}
+#         }))
+#         print(f"Total leave requests (any status): {len(with_status)}")
+        
+#     # ... rest of your conditions
+    
+#     return leave_request
+
+# Admin Page Leave Requests
+def get_manager_leave_requests(selected_option):
+    # Get Manager + HR IDs
+    managers_and_hr = list(Users.find({"position": {"$in": ["Manager", "HR"]}}))
+    user_ids = [str(user["_id"]) for user in managers_and_hr]
+
+
+    if selected_option == "Leave":
+        leave_request = list(Leave.find({
+            "leaveType": {"$in": ["Sick Leave", "Casual Leave", "Bonus Leave"]},
+            "status": {"$exists": False},
+            "userid": {"$in": user_ids}
+        }))
+    elif selected_option == "LOP":
+        leave_request = list(Leave.find({
+            "leaveType": "Other Leave",
+            "status": {"$exists": False},
+            "userid": {"$in": user_ids}
+        }))
+    elif selected_option == "Permission":
+        leave_request = list(Leave.find({
+            "leaveType": "Permission",
+            "status": {"$exists": False},
+            "userid": {"$in": user_ids}
+        }))
+    else:
+        leave_request = []
+    
+    # Process the results
+    for index, leave in enumerate(leave_request):
+        leave_request[index] = cleanid(leave)
+
+    for leave in leave_request:
+        if selected_option == "Leave" or selected_option == "Permission":
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+        else:
+            leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+            leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+            leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+
+    return leave_request
+
+# Similar functions for Remote Work requests
+def get_remote_work_requests_with_history(show_processed=False):
+    """Get remote work requests with history option"""
+    base_filter = {}
+    
+    if show_processed is False:  # Only pending
+        base_filter = {"Recommendation":"Recommend", "status": {"$exists": False}}
+    elif show_processed is True:  # Only processed
+        base_filter = {"status": {"$exists": True}}
+    
+    list1 = list()
+    res = RemoteWork.find(base_filter)
+    
+    for user in res:
+        cleanid(user)
+        user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
+        user["toDate"] = user["toDate"].strftime("%d-%m-%Y")
+        user["requestDate"] = user["requestDate"].strftime("%d-%m-%Y")
+        list1.append(user)
+    return list1
+
+def get_admin_page_remote_work_requests_with_history(show_processed=False):
+    """Get admin page remote work requests with history"""
+    managers = list(Users.find({"$or":[{"position": "Manager"}, {"department": "HR"}]}))
+    manager_ids = [str(manager["_id"]) for manager in managers]
+    
+    base_filter = {"userid": {"$in":manager_ids}}
+    
+    if show_processed is False:  # Only pending
+        base_filter.update({"Recommendation": {"$exists":False}, "status": {"$exists":False}})
+    elif show_processed is True:  # Only processed
+        base_filter.update({"status": {"$exists":True}})
+    
+    list1 = list()
+    res = RemoteWork.find(base_filter)
+    
+    for user in res:
+        cleanid(user)
+        user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
+        user["toDate"] = user["toDate"].strftime("%d-%m-%Y")
+        user["requestDate"] = user["requestDate"].strftime("%d-%m-%Y")
+        list1.append(user)
+    return list1
+
+def get_TL_page_remote_work_requests_with_history(TL, show_processed=False):
+    """Get TL page remote work requests with history"""
+    users = list(Users.find({"TL":TL}))
+    users_ids = [str(user["_id"]) for user in users]
+    
+    base_filter = {"userid": {"$in":users_ids}}
+    
+    if show_processed is False:  # Only pending
+        base_filter.update({"status": {"$exists": False}, "Recommendation":{"$exists":False}})
+    elif show_processed is True:  # Only processed
+        base_filter.update({"status": {"$exists":True}})
+    
+    list1 = list()
+    res = RemoteWork.find(base_filter)
+    
+    for user in res:
+        cleanid(user)
+        user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
+        user["toDate"] = user["toDate"].strftime("%d-%m-%Y")
+        user["requestDate"] = user["requestDate"].strftime("%d-%m-%Y")
+        list1.append(user)
+    return list1
 
 # Admin Page Leave Requests
 # def get_manager_leave_requests(selected_option):
@@ -1169,6 +1446,8 @@ def managers_leave_recommend_notification():
     print(message)
     return message
 
+
+
 #TL page
 def users_leave_recommend_notification(TL):
     users = list(Users.find({"position": {"$ne":"Manager"}, "TL":TL}))
@@ -1204,30 +1483,10 @@ from fastapi import HTTPException
 
 def store_remote_work_request(userid, employeeName, time, from_date, to_date, request_date, reason, ip):
     try:
-        # Convert string dates to datetime objects if needed
-        if isinstance(from_date, str):
-            try:
-                from_date_dt = datetime.strptime(from_date, "%Y-%m-%d")
-            except ValueError:
-                from_date_dt = datetime.strptime(from_date, "%d-%m-%Y")
-        else:
-            from_date_dt = datetime.strptime(from_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-            
-        if isinstance(to_date, str):
-            try:
-                to_date_dt = datetime.strptime(to_date, "%Y-%m-%d")
-            except ValueError:
-                to_date_dt = datetime.strptime(to_date, "%d-%m-%Y")
-        else:
-            to_date_dt = datetime.strptime(to_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-            
-        if isinstance(request_date, str):
-            try:
-                request_date_dt = datetime.strptime(request_date, "%Y-%m-%d")
-            except ValueError:
-                request_date_dt = datetime.strptime(request_date, "%d-%m-%Y")
-        else:
-            request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+        # Convert input strings to datetime objects
+        from_date_dt = datetime.strptime(from_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+        to_date_dt = datetime.strptime(to_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+        request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
         print(f"Storing remote work request for {employeeName}, UserID: {userid}...")
         print(f"Request Date: {request_date_dt}, From Date: {from_date_dt}, To Date: {to_date_dt}")
@@ -1249,6 +1508,9 @@ def store_remote_work_request(userid, employeeName, time, from_date, to_date, re
         num_weekdays_from_to = count_weekdays(from_date_dt, to_date_dt)
         future_days = (to_date_dt - from_date_dt).days
 
+        user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+        user_position = user_info.get("position", "User") if user_info else "User"
+
         print(f"Weekdays from request to start: {num_weekdays_request_to_from}, Future days: {future_days}")
 
         # Fetch Employee ID
@@ -1264,26 +1526,16 @@ def store_remote_work_request(userid, employeeName, time, from_date, to_date, re
                     "employeeID": employee_id,
                     "employeeName": employeeName,
                     "time": time,
+                    "position": user_position,
                     "fromDate": from_date_dt,  # ✅ Stored as `datetime` object
                     "toDate": to_date_dt,  # ✅ Stored as `datetime` object
                     "requestDate": request_date_dt,  # ✅ Stored as `datetime` object
                     "reason": reason,
                     "ip":ip,
-                    "status": "Pending",  # Add default status
-                    "created_at": get_current_timestamp_iso()  # Add timestamp
                 }
                 result = RemoteWork.insert_one(new_request)
-                wfh_id = str(result.inserted_id)
-                print("Insert result:", wfh_id)
-                
-                # Return success with WFH ID for notifications
-                return {
-                    "success": True,
-                    "message": "Remote work request stored successfully.",
-                    "wfh_id": wfh_id,
-                    "from_date": from_date_dt.strftime("%Y-%m-%d"),
-                    "to_date": to_date_dt.strftime("%Y-%m-%d")
-                }
+                print("Insert result:", result.inserted_id)
+                return "Remote work request stored successfully."
             else:
                 return "Remote work can be taken for a maximum of 3 days."
         else:
@@ -1325,10 +1577,8 @@ def get_admin_page_remote_work_requests():
     # Prepare a list of manager IDs
     manager_ids = [str(manager["_id"]) for manager in managers]
     list1 = list()
-    # Fixed query: Show manager WFH requests with status "Pending" that need admin approval
-    res = RemoteWork.find({"userid": {"$in":manager_ids}, "status": "Pending"})
-    print(f"Admin page WFH query result: {list(res)}")
-    res = RemoteWork.find({"userid": {"$in":manager_ids}, "status": "Pending"})  # Re-query due to cursor exhaustion
+    res = RemoteWork.find({"userid": {"$in":manager_ids}, "Recommendation": {"$exists":False}, "status": {"$exists":False}})
+    print(res)
     for user in res:
         cleanid(user)
         user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
@@ -1344,10 +1594,8 @@ def get_TL_page_remote_work_requests(TL):
     # Prepare a list of user IDs under this TL
     users_ids = [str(user["_id"]) for user in users]
     list1 = list()
-    # Show employee WFH requests that are pending manager approval (status "Pending" and no recommendation)
-    res = RemoteWork.find({"userid": {"$in":users_ids}, "status": "Pending", "Recommendation":{"$exists":False}})
-    print(f"TL WFH query result: {list(res)}")
-    res = RemoteWork.find({"userid": {"$in":users_ids}, "status": "Pending", "Recommendation":{"$exists":False}})  # Re-query due to cursor exhaustion
+    res = RemoteWork.find({"userid": {"$in":users_ids}, "status": {"$exists": False}, "Recommendation":{"$exists":False}})
+    print(res)
     for user in res:
         cleanid(user)
         user["fromDate"] = user["fromDate"].strftime("%d-%m-%Y")
@@ -1386,6 +1634,7 @@ def update_remote_work_request_status_in_mongo(userid, status, wfh_id):
                 {"$set": {"status": status}, "$unset": {"Recommendation": ""}}
             )
         
+        result = RemoteWork.update_one({"_id":ObjectId(wfh_id), "userid": userid, "status":None, "Recommendation": "Recommend"}, {"$set": {"status": status}, "$unset": { "Recommendation": ""}})
         if result.modified_count > 0:
             print(f"✅ WFH status updated successfully to {status}")
             return True
@@ -1419,30 +1668,9 @@ def update_remote_work_request_recommend_in_mongo(userid, status, wfh_id):
 
 
 def store_Other_leave_request(userid, employee_name, time, leave_type, selected_date, To_date, request_date, reason):
-    # Convert string dates to datetime objects if needed
-    if isinstance(selected_date, str):
-        try:
-            selected_date = datetime.strptime(selected_date, "%Y-%m-%d")
-        except ValueError:
-            selected_date = datetime.strptime(selected_date, "%d-%m-%Y")
-    else:
-        selected_date = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-        
-    if isinstance(To_date, str):
-        try:
-            To_date = datetime.strptime(To_date, "%Y-%m-%d")
-        except ValueError:
-            To_date = datetime.strptime(To_date, "%d-%m-%Y")
-    else:
-        To_date = datetime.strptime(To_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-        
-    if isinstance(request_date, str):
-        try:
-            request_date = datetime.strptime(request_date, "%Y-%m-%d")
-        except ValueError:
-            request_date = datetime.strptime(request_date, "%d-%m-%Y")
-    else:
-        request_date = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    selected_date = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    To_date = datetime.strptime(To_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    request_date = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
     if request_date.weekday() == 6:
         return "Request date is a Sunday. Request not allowed."
@@ -1462,6 +1690,9 @@ def store_Other_leave_request(userid, employee_name, time, leave_type, selected_
         num_weekdays_from_to = count_weekdays(selected_date, To_date)
         
         future_days = (To_date - selected_date).days
+
+        user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+        user_position = user_info.get("position", "User") if user_info else "User"
         
         employee_id = get_employee_id_from_db(employee_name)
          
@@ -1471,6 +1702,7 @@ def store_Other_leave_request(userid, employee_name, time, leave_type, selected_
                 "Employee_ID": employee_id, 
                 "employeeName": employee_name,
                 "time": time,
+                "position": user_position,
                 "leaveType": leave_type,
                 "selectedDate": selected_date,
                 "ToDate" : To_date,
@@ -1487,22 +1719,9 @@ def store_Other_leave_request(userid, employee_name, time, leave_type, selected_
 
 
 def store_Permission_request(userid, employee_name, time, leave_type, selected_date, request_date, Time_Slot, reason):
-    # Convert string dates to datetime objects if needed
-    if isinstance(selected_date, str):
-        try:
-            selected_date_dt = datetime.strptime(selected_date, "%Y-%m-%d")
-        except ValueError:
-            selected_date_dt = datetime.strptime(selected_date, "%d-%m-%Y")
-    else:
-        selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
-        
-    if isinstance(request_date, str):
-        try:
-            request_date_dt = datetime.strptime(request_date, "%Y-%m-%d")
-        except ValueError:
-            request_date_dt = datetime.strptime(request_date, "%d-%m-%Y")
-    else:
-        request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    # Convert to datetime objects
+    selected_date_dt = datetime.strptime(selected_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
+    request_date_dt = datetime.strptime(request_date.strftime("%d-%m-%Y"), "%d-%m-%Y")
 
     # Check for existing leave conflicts
     if check_leave_conflict(userid, selected_date_dt):
@@ -1518,11 +1737,15 @@ def store_Permission_request(userid, employee_name, time, leave_type, selected_d
 
     employee_id = get_employee_id_from_db(employee_name)
 
+    user_info = Users.find_one({"_id": ObjectId(userid)}, {"position": 1})
+    user_position = user_info.get("position", "User") if user_info else "User"
+
     new_leave = {
         "userid": userid,
         "Employee_ID": employee_id,
         "employeeName": employee_name,
         "time": time,
+        "position": user_position,
         "leaveType": leave_type,
         "selectedDate": selected_date_dt,  # ✅ Stored as `datetime` object
         "requestDate": request_date_dt,  # ✅ Stored as `datetime` object
@@ -1598,6 +1821,18 @@ def get_admin_info(email):
     admin_info = admin.find_one({'email':email}, {"password":0})
     return admin_info
 
+# def add_task_list(tasks, userid: str, today, due_date):
+#     for task in tasks:
+#         t = {
+#             "task": task,
+#             "status": "Not completed",
+#             "date": today,
+#             "due_date": due_date,
+#             "userid": userid,
+#         }
+#         result = Tasks.insert_one(t)
+#     return "Task added Successfully"
+
 def iso_today():
     return datetime.now().strftime("%Y-%m-%d")
 
@@ -1615,20 +1850,105 @@ def add_task_list(task, userid, date, due_date, assigned_by="self",priority="Med
         "subtasks": subtasks or [],
         "comments": comments or [],           # NEW
         "files": files or [],              # NEW
+        "created_at": get_current_timestamp_iso()
 }
     result = Tasks.insert_one(task_entry)
+    
+    # Create notification for task creation
+    try:
+        task_data = task_entry.copy()
+        task_data["_id"] = result.inserted_id
+        
+        # Create sync notification for task creation
+        create_notification(
+            userid=userid,
+            title="Task Created Successfully",
+            message=f"Your task '{task}' has been created successfully.",
+            notification_type="task",
+            priority="medium",
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=str(result.inserted_id),
+            metadata={
+                "task_title": task,
+                "action": "Created",
+                "created_by": assigned_by if assigned_by != "self" else userid
+            }
+        )
+        
+        # If assigned by someone else, notify the assigner too
+        if assigned_by and assigned_by != "self" and assigned_by != userid:
+            create_notification(
+                userid=assigned_by,
+                title="Task Assignment Confirmed",
+                message=f"You have successfully assigned the task '{task}' to a team member.",
+                notification_type="task",
+                priority="medium",
+                action_url=get_role_based_action_url(assigned_by, "manager_task"),
+                related_id=str(result.inserted_id),
+                metadata={
+                    "task_title": task,
+                    "action": "Assigned",
+                    "assignee_id": userid
+                }
+            )
+    except Exception as e:
+        print(f"Error creating task notification: {e}")
+    
     return str(result.inserted_id)
 
-def manager_task_assignment(task:str, userid: str, TL, today, due_date):
-    task = {
+def manager_task_assignment(task:str, userid: str, TL, today, due_date, assigned_by=None, priority="Medium"):
+    task_entry = {
         "task": task,
         "status": "Not completed",
         "date": today,
         "due_date": due_date,
         "userid": userid,
         "TL": TL,
+        "assigned_by": assigned_by or TL,
+        "priority": priority,
+        "subtasks": [],
+        "comments": [],
+        "files": [],
+        "created_at": get_current_timestamp_iso()
     }
-    result = Tasks.insert_one(task)
+    result = Tasks.insert_one(task_entry)
+    
+    # Create notification for task assignment
+    try:
+        # Use the enhanced notification function for the assignee
+        import asyncio
+        asyncio.create_task(create_task_manager_assigned_notification(
+            userid=userid,
+            task_title=task,
+            manager_name=assigned_by or TL,
+            task_id=str(result.inserted_id),
+            due_date=due_date,
+            priority="high"
+        ))
+        
+        # Notify the manager/assigner
+        if assigned_by or TL:
+            manager_id = assigned_by or TL
+            user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+            assignee_name = user.get("name", "Employee") if user else "Employee"
+            
+            create_notification(
+                userid=manager_id,
+                title="Task Assignment Confirmed",
+                message=f"You have successfully assigned the task '{task}' to {assignee_name}.",
+                notification_type="task",
+                priority="medium",
+                action_url=get_role_based_action_url(manager_id, "manager_task"),
+                related_id=str(result.inserted_id),
+                metadata={
+                    "task_title": task,
+                    "action": "Assignment Confirmed",
+                    "assignee_name": assignee_name
+                }
+            )
+    except Exception as e:
+        print(f"Error creating task assignment notification: {e}")
+    
     return str(result.inserted_id)
 
 def edit_the_task(
@@ -1705,10 +2025,697 @@ def edit_the_task(
 
     # Update DB
     if update_fields:
+        # Get current task data before update for comparison
+        current_task = Tasks.find_one({"_id": ObjectId(taskid), "userid": userid})
+        if not current_task:
+            return "Task not found"
+        
         result = Tasks.update_one(
             {"_id": ObjectId(taskid), "userid": userid},
             {"$set": update_fields}
         )
+        
+        if result.matched_count > 0:
+            # Create notifications for task updates
+            try:
+                # Get updated task data
+                updated_task = Tasks.find_one({"_id": ObjectId(taskid)})
+                task_title = updated_task.get("task", "Task") if updated_task else "Task"
+                
+                # Prepare changes for notification
+                changes = {}
+                for field, new_value in update_fields.items():
+                    if field in current_task and current_task[field] != new_value:
+                        changes[field] = new_value
+                
+                # Handle special notifications
+                if "comments" in update_fields and len(update_fields["comments"]) > len(current_task.get("comments", [])):
+                    # New comment added
+                    new_comment = update_fields["comments"][-1]  # Last comment is the new one
+                    comment_text = new_comment.get("text", "")
+                    commented_by = new_comment.get("user", "")  # Use 'user' field from comment
+                    
+                    # Get commenter name - first try to find by name (since comment.user contains name)
+                    commenter = Users.find_one({"name": commented_by}) if commented_by else None
+                    if not commenter and ObjectId.is_valid(commented_by):
+                        commenter = Users.find_one({"_id": ObjectId(commented_by)})
+                    commenter_name = commenter.get("name", commented_by or "Team Member") if commenter else (commented_by or "Team Member")
+                    commenter_id = str(commenter["_id"]) if commenter else None
+                    
+                    # Notify task owner only if they didn't add the comment themselves
+                    if commenter_id != userid:
+                        create_notification(
+                            userid=userid,
+                            title="New Comment Added",
+                            message=f"{commenter_name} added a comment to your task '{task_title}': '{comment_text[:100]}{'...' if len(comment_text) > 100 else ''}'",
+                            notification_type="task",
+                            priority="medium",
+                            action_url=get_role_based_action_url(userid, "task"),
+                            related_id=taskid,
+                            metadata={
+                                "task_title": task_title,
+                                "action": "Comment Added",
+                                "comment_text": comment_text,
+                                "commented_by": commented_by
+                            }
+                        )
+                    
+                    # Also notify the appropriate authority based on hierarchy if the user commented on their own task
+                    if commenter_id == userid:  # User added comment to their own task
+                        # Get commenter role to determine notification hierarchy
+                        commenter_role = get_user_role(commenter_id)
+                        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+                        
+                        if commenter_role == "manager":
+                            # Manager added comment → Notify HR
+                            hr_users = get_hr_users()
+                            
+                            for hr_user in hr_users:
+                                hr_id = str(hr_user["_id"])
+                                hr_name = hr_user.get("name", "HR")
+                                
+                                notification_id = create_notification(
+                                    userid=hr_id,
+                                    title="Manager Comment Added",
+                                    message=f"Manager {commenter_name} added a comment to the task '{task_title}': '{comment_text[:100]}{'...' if len(comment_text) > 100 else ''}'",
+                                    notification_type="task",
+                                    priority="medium",
+                                    action_url=get_role_based_action_url(hr_id, "hr_task"),
+                                    related_id=taskid,
+                                    metadata={
+                                        "task_title": task_title,
+                                        "action": "Comment Added",
+                                        "comment_text": comment_text,
+                                        "commented_by": commented_by,
+                                        "manager_name": commenter_name,
+                                        "manager_id": userid,
+                                        "notification_hierarchy": "manager_to_hr"
+                                    }
+                                )
+                                
+                                # Send real-time WebSocket notification to HR
+                                try:
+                                    from websocket_manager import notification_manager
+                                    import asyncio
+                                    
+                                    # Create async task for WebSocket notification
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        asyncio.create_task(notification_manager.send_personal_notification(hr_id, {
+                                            "_id": notification_id,
+                                            "title": "Manager Comment Added",
+                                            "message": f"Manager {commenter_name} added a comment to the task '{task_title}': '{comment_text[:50]}{'...' if len(comment_text) > 50 else ''}'",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    else:
+                                        loop.run_until_complete(notification_manager.send_personal_notification(hr_id, {
+                                            "_id": notification_id,
+                                            "title": "Manager Comment Added",
+                                            "message": f"Manager {commenter_name} added a comment to the task '{task_title}': '{comment_text[:50]}{'...' if len(comment_text) > 50 else ''}'",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    
+                                    print(f"✅ HR {hr_name} notified about Manager {commenter_name}'s comment: {comment_text[:30]}...")
+                                except Exception as ws_error:
+                                    print(f"Error sending WebSocket notification to HR: {ws_error}")
+                        
+                        else:
+                            # Employee added comment → Notify Manager
+                            # Find the manager who should be notified
+                            manager_to_notify = None
+                            assigned_by = updated_task.get("assigned_by")
+                            tl = updated_task.get("TL")
+                            
+                            # Determine the manager to notify using same logic as task completion
+                            if assigned_by and assigned_by != "self" and assigned_by != userid:
+                                manager_to_notify = assigned_by
+                            elif tl and tl != userid:
+                                manager_to_notify = tl
+                            elif user:
+                                user_tl = user.get("TL")
+                                user_manager = user.get("manager")
+                                if user_tl and user_tl != userid:
+                                    manager_to_notify = user_tl
+                                elif user_manager and user_manager != userid:
+                                    manager_to_notify = user_manager
+                            
+                            # Send notification to manager
+                            if manager_to_notify:
+                                manager = None
+                                if ObjectId.is_valid(manager_to_notify):
+                                    manager = Users.find_one({"_id": ObjectId(manager_to_notify)})
+                                else:
+                                    manager = Users.find_one({"$or": [
+                                        {"name": manager_to_notify},
+                                        {"userid": manager_to_notify}
+                                    ]})
+                                
+                                if manager:
+                                    manager_id = str(manager["_id"])
+                                    manager_name = manager.get("name", "Manager")
+                                    
+                                    notification_id = create_notification(
+                                        userid=manager_id,
+                                        title="Employee Comment Added",
+                                        message=f"{commenter_name} added a comment to the task '{task_title}': '{comment_text[:100]}{'...' if len(comment_text) > 100 else ''}'",
+                                        notification_type="task",
+                                        priority="medium",
+                                        action_url=get_role_based_action_url(manager_id, "manager_task"),
+                                        related_id=taskid,
+                                        metadata={
+                                            "task_title": task_title,
+                                            "action": "Comment Added",
+                                            "comment_text": comment_text,
+                                            "commented_by": commented_by,
+                                            "employee_name": commenter_name,
+                                            "employee_id": userid,
+                                            "notification_hierarchy": "employee_to_manager"
+                                        }
+                                    )
+                                    
+                                    # Send real-time WebSocket notification to manager
+                                    try:
+                                        from websocket_manager import notification_manager
+                                        import asyncio
+                                        
+                                        # Create async task for WebSocket notification
+                                        loop = asyncio.get_event_loop()
+                                        if loop.is_running():
+                                            asyncio.create_task(notification_manager.send_personal_notification(manager_id, {
+                                                "_id": notification_id,
+                                                "title": "Employee Comment Added",
+                                                "message": f"{commenter_name} added a comment to the task '{task_title}': '{comment_text[:50]}{'...' if len(comment_text) > 50 else ''}'",
+                                                "type": "task",
+                                                "priority": "medium"
+                                            }))
+                                        else:
+                                            loop.run_until_complete(notification_manager.send_personal_notification(manager_id, {
+                                                "_id": notification_id,
+                                                "title": "Employee Comment Added",
+                                                "message": f"{commenter_name} added a comment to the task '{task_title}': '{comment_text[:50]}{'...' if len(comment_text) > 50 else ''}'",
+                                                "type": "task",
+                                                "priority": "medium"
+                                            }))
+                                        
+                                        print(f"✅ Manager {manager_name} notified about {commenter_name}'s comment: {comment_text[:30]}...")
+                                    except Exception as ws_error:
+                                        print(f"Error sending WebSocket notification to manager: {ws_error}")
+                                else:
+                                    print(f"⚠️ Manager not found: {manager_to_notify}")
+                            else:
+                                print(f"ℹ️ No manager found to notify for {commenter_name}'s comment")
+                
+                if "files" in update_fields and len(update_fields["files"]) > len(current_task.get("files", [])):
+                    # New file uploaded
+                    new_file = update_fields["files"][-1]  # Last file is the new one
+                    filename = new_file.get("name", "file")
+                    uploaded_by = new_file.get("uploadedBy", "")
+                    
+                    # Extract uploader name from uploadedBy field (format: "Name (Position)")
+                    uploader_name = uploaded_by.split(" (")[0] if " (" in uploaded_by else uploaded_by
+                    
+                    # Find uploader in database to get their ID
+                    uploader = Users.find_one({"name": uploader_name}) if uploader_name else None
+                    uploader_id = str(uploader["_id"]) if uploader else None
+                    
+                    # Notify task owner only if they didn't upload the file themselves
+                    if uploader_id != userid:
+                        create_notification(
+                            userid=userid,
+                            title="File Uploaded",
+                            message=f"{uploader_name} uploaded a file '{filename}' to your task '{task_title}'.",
+                            notification_type="task",
+                            priority="medium",
+                            action_url=get_role_based_action_url(userid, "task"),
+                            related_id=taskid,
+                            metadata={
+                                "task_title": task_title,
+                                "action": "File Uploaded",
+                                "filename": filename,
+                                "uploaded_by": uploaded_by
+                            }
+                        )
+                    
+                    # Also notify the appropriate authority based on hierarchy if the user uploaded to their own task
+                    if uploader_id == userid:  # User uploaded file to their own task
+                        # Get uploader role to determine notification hierarchy
+                        uploader_role = get_user_role(uploader_id)
+                        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+                        
+                        if uploader_role == "manager":
+                            # Manager uploaded file → Notify HR
+                            hr_users = get_hr_users()
+                            
+                            for hr_user in hr_users:
+                                hr_id = str(hr_user["_id"])
+                                hr_name = hr_user.get("name", "HR")
+                                
+                                notification_id = create_notification(
+                                    userid=hr_id,
+                                    title="Manager File Uploaded",
+                                    message=f"Manager {uploader_name} uploaded a file '{filename}' to the task '{task_title}'. Please review if needed.",
+                                    notification_type="task",
+                                    priority="medium",
+                                    action_url=get_role_based_action_url(hr_id, "hr_task"),
+                                    related_id=taskid,
+                                    metadata={
+                                        "task_title": task_title,
+                                        "action": "File Uploaded",
+                                        "filename": filename,
+                                        "uploaded_by": uploaded_by,
+                                        "manager_name": uploader_name,
+                                        "manager_id": userid,
+                                        "notification_hierarchy": "manager_to_hr"
+                                    }
+                                )
+                                
+                                # Send real-time WebSocket notification to HR
+                                try:
+                                    from websocket_manager import notification_manager
+                                    import asyncio
+                                    
+                                    # Create async task for WebSocket notification
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        asyncio.create_task(notification_manager.send_personal_notification(hr_id, {
+                                            "_id": notification_id,
+                                            "title": "Manager File Uploaded",
+                                            "message": f"Manager {uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    else:
+                                        loop.run_until_complete(notification_manager.send_personal_notification(hr_id, {
+                                            "_id": notification_id,
+                                            "title": "Manager File Uploaded",
+                                            "message": f"Manager {uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    
+                                    print(f"✅ HR {hr_name} notified about Manager {uploader_name}'s file upload: {filename}")
+                                except Exception as ws_error:
+                                    print(f"Error sending WebSocket notification to HR: {ws_error}")
+                        
+                        else:
+                            # Employee uploaded file → Notify Manager
+                            # Find the manager who should be notified
+                            manager_to_notify = None
+                            assigned_by = updated_task.get("assigned_by")
+                            tl = updated_task.get("TL")
+                            
+                            # Determine the manager to notify using same logic as task completion
+                            if assigned_by and assigned_by != "self" and assigned_by != userid:
+                                manager_to_notify = assigned_by
+                            elif tl and tl != userid:
+                                manager_to_notify = tl
+                            elif user:
+                                user_tl = user.get("TL")
+                                user_manager = user.get("manager")
+                                if user_tl and user_tl != userid:
+                                    manager_to_notify = user_tl
+                                elif user_manager and user_manager != userid:
+                                    manager_to_notify = user_manager
+                            
+                            # Send notification to manager
+                            if manager_to_notify:
+                                manager = None
+                                if ObjectId.is_valid(manager_to_notify):
+                                    manager = Users.find_one({"_id": ObjectId(manager_to_notify)})
+                                else:
+                                    manager = Users.find_one({"$or": [
+                                        {"name": manager_to_notify},
+                                        {"userid": manager_to_notify}
+                                    ]})
+                                
+                                if manager:
+                                    manager_id = str(manager["_id"])
+                                    manager_name = manager.get("name", "Manager")
+                                    
+                                    notification_id = create_notification(
+                                        userid=manager_id,
+                                        title="Employee File Uploaded",
+                                        message=f"{uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                        notification_type="task",
+                                        priority="medium",
+                                        action_url=get_role_based_action_url(manager_id, "manager_task"),
+                                        related_id=taskid,
+                                        metadata={
+                                            "task_title": task_title,
+                                            "action": "File Uploaded",
+                                            "filename": filename,
+                                            "uploaded_by": uploaded_by,
+                                            "employee_name": uploader_name,
+                                            "employee_id": userid,
+                                            "notification_hierarchy": "employee_to_manager"
+                                        }
+                                    )
+                                    
+                                    # Send real-time WebSocket notification to manager
+                                    try:
+                                        from websocket_manager import notification_manager
+                                        import asyncio
+                                        
+                                        # Create async task for WebSocket notification
+                                        loop = asyncio.get_event_loop()
+                                        if loop.is_running():
+                                            asyncio.create_task(notification_manager.send_personal_notification(manager_id, {
+                                                "_id": notification_id,
+                                                "title": "Employee File Uploaded",
+                                                "message": f"{uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                                "type": "task",
+                                                "priority": "medium"
+                                            }))
+                                        else:
+                                            loop.run_until_complete(notification_manager.send_personal_notification(manager_id, {
+                                                "_id": notification_id,
+                                                "title": "Employee File Uploaded",
+                                                "message": f"{uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                                "type": "task",
+                                                "priority": "medium"
+                                            }))
+                                        
+                                        print(f"✅ Manager {manager_name} notified about {uploader_name}'s file upload: {filename}")
+                                    except Exception as ws_error:
+                                        print(f"Error sending WebSocket notification to manager: {ws_error}")
+                                else:
+                                    print(f"⚠️ Manager not found: {manager_to_notify}")
+                            else:
+                                print(f"ℹ️ No manager found to notify for {uploader_name}'s file upload")
+                
+                if "subtasks" in update_fields and len(update_fields["subtasks"]) > len(current_task.get("subtasks", [])):
+                    # New subtask added
+                    new_subtask = update_fields["subtasks"][-1]  # Last subtask is the new one
+                    subtask_text = new_subtask.get("text", "")
+                    
+                    # Get user who made the request (the one editing the task)
+                    user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+                    user_name = user.get("name", "Team Member") if user else "Team Member"
+                    
+                    # Notify appropriate authority based on hierarchy when subtask is added
+                    # Get user role to determine notification hierarchy
+                    user_role = get_user_role(userid)
+                    
+                    if user_role == "manager":
+                        # Manager added subtask → Notify HR
+                        hr_users = get_hr_users()
+                        
+                        for hr_user in hr_users:
+                            hr_id = str(hr_user["_id"])
+                            hr_name = hr_user.get("name", "HR")
+                            
+                            notification_id = create_notification(
+                                userid=hr_id,
+                                title="Manager Subtask Added",
+                                message=f"Manager {user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                notification_type="task",
+                                priority="medium",
+                                action_url=get_role_based_action_url(hr_id, "hr_task"),
+                                related_id=taskid,
+                                metadata={
+                                    "task_title": task_title,
+                                    "action": "Subtask Added",
+                                    "subtask_text": subtask_text,
+                                    "manager_name": user_name,
+                                    "manager_id": userid,
+                                    "notification_hierarchy": "manager_to_hr"
+                                }
+                            )
+                            
+                            # Send real-time WebSocket notification to HR
+                            try:
+                                from websocket_manager import notification_manager
+                                import asyncio
+                                
+                                # Create async task for WebSocket notification
+                                loop = asyncio.get_event_loop()
+                                if loop.is_running():
+                                    asyncio.create_task(notification_manager.send_personal_notification(hr_id, {
+                                        "_id": notification_id,
+                                        "title": "Manager Subtask Added",
+                                        "message": f"Manager {user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                        "type": "task",
+                                        "priority": "medium"
+                                    }))
+                                else:
+                                    loop.run_until_complete(notification_manager.send_personal_notification(hr_id, {
+                                        "_id": notification_id,
+                                        "title": "Manager Subtask Added",
+                                        "message": f"Manager {user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                        "type": "task",
+                                        "priority": "medium"
+                                    }))
+                                
+                                print(f"✅ HR {hr_name} notified about Manager {user_name}'s subtask: {subtask_text}")
+                            except Exception as ws_error:
+                                print(f"Error sending WebSocket notification to HR: {ws_error}")
+                    
+                    else:
+                        # Employee added subtask → Notify Manager
+                        # Find the manager who should be notified
+                        manager_to_notify = None
+                        assigned_by = updated_task.get("assigned_by")
+                        tl = updated_task.get("TL")
+                        
+                        # Determine the manager to notify using same logic as task completion
+                        if assigned_by and assigned_by != "self" and assigned_by != userid:
+                            manager_to_notify = assigned_by
+                        elif tl and tl != userid:
+                            manager_to_notify = tl
+                        elif user:
+                            user_tl = user.get("TL")
+                            user_manager = user.get("manager")
+                            if user_tl and user_tl != userid:
+                                manager_to_notify = user_tl
+                            elif user_manager and user_manager != userid:
+                                manager_to_notify = user_manager
+                        
+                        # Send notification to manager
+                        if manager_to_notify:
+                            manager = None
+                            if ObjectId.is_valid(manager_to_notify):
+                                manager = Users.find_one({"_id": ObjectId(manager_to_notify)})
+                            else:
+                                manager = Users.find_one({"$or": [
+                                    {"name": manager_to_notify},
+                                    {"userid": manager_to_notify}
+                                ]})
+                            
+                            if manager:
+                                manager_id = str(manager["_id"])
+                                manager_name = manager.get("name", "Manager")
+                                
+                                notification_id = create_notification(
+                                    userid=manager_id,
+                                    title="Employee Subtask Added",
+                                    message=f"{user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                    notification_type="task",
+                                    priority="medium",
+                                    action_url=get_role_based_action_url(manager_id, "manager_task"),
+                                    related_id=taskid,
+                                    metadata={
+                                        "task_title": task_title,
+                                        "action": "Subtask Added",
+                                        "subtask_text": subtask_text,
+                                        "employee_name": user_name,
+                                        "employee_id": userid,
+                                        "notification_hierarchy": "employee_to_manager"
+                                    }
+                                )
+                                
+                                # Send real-time WebSocket notification to manager
+                                try:
+                                    from websocket_manager import notification_manager
+                                    import asyncio
+                                    
+                                    # Create async task for WebSocket notification
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        asyncio.create_task(notification_manager.send_personal_notification(manager_id, {
+                                            "_id": notification_id,
+                                            "title": "Employee Subtask Added",
+                                            "message": f"{user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    else:
+                                        loop.run_until_complete(notification_manager.send_personal_notification(manager_id, {
+                                            "_id": notification_id,
+                                            "title": "Employee Subtask Added",
+                                            "message": f"{user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    
+                                    print(f"✅ Manager {manager_name} notified about {user_name}'s subtask: {subtask_text}")
+                                except Exception as ws_error:
+                                    print(f"Error sending WebSocket notification to manager: {ws_error}")
+                            else:
+                                print(f"⚠️ Manager not found: {manager_to_notify}")
+                        else:
+                            print(f"ℹ️ No manager found to notify for {user_name}'s subtask")
+                
+                # General task update notification (only if there are meaningful changes)
+                if changes and not any(key in ["comments", "files", "subtasks"] for key in changes.keys()):
+                    # Check for status change
+                    if "status" in changes:
+                        old_status = current_task.get("status", "")
+                        new_status = changes["status"]
+                        
+                        # Don't send status change notification to employee when they complete their own task
+                        # The hierarchy-based completion notification will handle manager/HR notifications
+                        if not (new_status.lower() in ["completed", "done"]):
+                            create_notification(
+                                userid=userid,
+                                title="Task Status Updated",
+                                message=f"Your task '{task_title}' status has been changed from '{old_status}' to '{new_status}'.",
+                                notification_type="task",
+                                priority="high" if new_status.lower() in ["completed", "done"] else "medium",
+                                action_url=get_role_based_action_url(userid, "task"),
+                                related_id=taskid,
+                                metadata={
+                                    "task_title": task_title,
+                                    "action": "Status Changed",
+                                    "old_status": old_status,
+                                    "new_status": new_status
+                                }
+                            )
+                        
+                        # If task completed, notify appropriate authority based on hierarchy
+                        if new_status.lower() in ["completed", "done"] and updated_task:
+                            assigned_by = updated_task.get("assigned_by")
+                            tl = updated_task.get("TL")  # Also check TL field
+                            user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+                            assignee_name = user.get("name", "Employee") if user else "Employee"
+                            
+                            print(f"🔍 Task completion debug - assigned_by: {assigned_by}, TL: {tl}, userid: {userid}")
+                            
+                            # Determine the manager to notify
+                            manager_to_notify = None
+                            
+                            # Case 1: Task assigned by a specific manager (assigned_by is not "self")
+                            if assigned_by and assigned_by != "self" and assigned_by != userid:
+                                manager_to_notify = assigned_by
+                                print(f"📋 Task assigned by manager: {assigned_by}")
+                            
+                            # Case 2: Check if task has TL field (Team Leader)
+                            elif tl and tl != userid:
+                                manager_to_notify = tl
+                                print(f"👥 Task assigned by TL: {tl}")
+                            
+                            # Case 3: Find user's manager from their profile
+                            elif user:
+                                user_tl = user.get("TL")
+                                user_manager = user.get("manager") 
+                                if user_tl and user_tl != userid:
+                                    manager_to_notify = user_tl
+                                    print(f"👤 User's TL from profile: {user_tl}")
+                                elif user_manager and user_manager != userid:
+                                    manager_to_notify = user_manager
+                                    print(f"👤 User's manager from profile: {user_manager}")
+                            
+                            # Send notification to the identified manager
+                            if manager_to_notify:
+                                # Verify manager exists and get their details
+                                manager = None
+                                if ObjectId.is_valid(manager_to_notify):
+                                    manager = Users.find_one({"_id": ObjectId(manager_to_notify)})
+                                else:
+                                    # Try to find by name or other identifier
+                                    manager = Users.find_one({"$or": [
+                                        {"name": manager_to_notify},
+                                        {"userid": manager_to_notify},
+                                        {"_id": manager_to_notify}
+                                    ]})
+                                
+                                if manager:
+                                    manager_id = str(manager["_id"])
+                                    manager_name = manager.get("name", "Manager")
+                                    
+                                    print(f"✅ Notifying manager {manager_name} ({manager_id}) about {assignee_name}'s task completion")
+                                    
+                                    # Use enhanced hierarchy-based notification system
+                                    import asyncio
+                                    try:
+                                        completion_notifications = asyncio.run(create_task_completion_notification(
+                                            assignee_id=userid,
+                                            manager_id=manager_id,
+                                            task_title=task_title,
+                                            assignee_name=assignee_name,
+                                            task_id=taskid
+                                        ))
+                                        print(f"✅ Hierarchy completion notifications sent: {len(completion_notifications) if completion_notifications else 0}")
+                                    except Exception as e:
+                                        print(f"Error sending hierarchy completion notifications: {e}")
+                                        # Fallback to direct notification
+                                        create_notification(
+                                            userid=manager_id,
+                                            title="Task Completed",
+                                            message=f"{assignee_name} has completed the task '{task_title}'. Please review the work.",
+                                            notification_type="task_completed",
+                                            priority="high",
+                                            action_url=get_role_based_action_url(manager_id, "manager_task"),
+                                            related_id=taskid,
+                                            metadata={
+                                                "task_title": task_title,
+                                                "action": "Completed",
+                                                "assignee_name": assignee_name,
+                                                "assignee_id": userid
+                                            }
+                                        )
+                                else:
+                                    print(f"⚠️ Manager not found: {manager_to_notify}")
+                            else:
+                                # Handle case where no manager is found - check if user is a manager themselves
+                                user_role = get_user_role(userid)
+                                if user_role == "manager":
+                                    print(f"🏢 Manager {assignee_name} completed own task - notifying HR")
+                                    import asyncio
+                                    try:
+                                        completion_notifications = asyncio.run(create_task_completion_notification(
+                                            assignee_id=userid,
+                                            manager_id=None,  # No manager to notify, this is for HR
+                                            task_title=task_title,
+                                            assignee_name=assignee_name,
+                                            task_id=taskid
+                                        ))
+                                        print(f"✅ Manager self-task completion notifications sent to HR: {len(completion_notifications) if completion_notifications else 0}")
+                                    except Exception as e:
+                                        print(f"Error sending manager self-task completion notifications: {e}")
+                                else:
+                                    print(f"ℹ️ No manager found to notify for employee {assignee_name}'s task completion")
+                    else:
+                        # Other field changes
+                        change_details = []
+                        if "priority" in changes:
+                            change_details.append(f"priority to {changes['priority']}")
+                        if "due_date" in changes:
+                            change_details.append(f"due date to {changes['due_date']}")
+                        if "task" in changes:
+                            change_details.append("task description")
+                        
+                        if change_details:
+                            changes_text = ", ".join(change_details)
+                            create_notification(
+                                userid=userid,
+                                title="Task Updated",
+                                message=f"Your task '{task_title}' has been updated. Changes: {changes_text}",
+                                notification_type="task",
+                                priority="medium",
+                                action_url=get_role_based_action_url(userid, "task"),
+                                related_id=taskid,
+                                metadata={
+                                    "task_title": task_title,
+                                    "action": "Updated",
+                                    "changes": changes
+                                }
+                            )
+                
+            except Exception as e:
+                print(f"Error creating task update notifications: {e}")
+        
         return "Task updated successfully" if result.matched_count > 0 else "Task not found"
     else:
         return "No fields to update"
@@ -1726,10 +2733,14 @@ def add_file_to_task(taskid: str, file_data: dict):
 
 
 def get_task_file_metadata(taskid: str, fileid: str):
+    """
+    Return the metadata dict for a single file inside task.files[].
+    Returns None if not found.
+    """
     try:
         task = Tasks.find_one(
             {"_id": ObjectId(taskid), "files.id": fileid},
-            {"files.$": 1} 
+            {"files.$": 1}  # project only the matching file element
         )
         if not task or "files" not in task:
             return None
@@ -1748,7 +2759,11 @@ def delete_a_task(taskid):
     except Exception as e:
         return f"Error: {str(e)}"
 
+def get_the_tasks(userid: str, date: str = None):
+    query = {"userid": userid}
 
+    if date:
+        query["date"] = date  
 
 def get_the_tasks(userid: str, date: str = None):
     query = {"userid": userid}
@@ -1986,8 +3001,6 @@ def edit_an_employee(employee_data):
         for field in required_fields:
             if not employee_data.get(field):
                 raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
-        
-        # Clean the data - remove empty education and skills entries
         clean_education = [
             edu for edu in employee_data.get('education', []) 
             if edu.get('degree') or edu.get('institution') or edu.get('year')
@@ -2089,12 +3102,16 @@ async def task_assign_to_multiple_users_with_notification(task_details, assigner
         
         for task in tasks:
             task_entry = {
-                "task": task,
+                "task": [task],
                 "status": "Not completed",
                 "date": datetime.strptime(item["date"], "%Y-%m-%d").strftime("%d-%m-%Y"),
                 "due_date": due_date,
                 "userid": userid,
-                "TL": item["TL"],
+                "assigned_by": item.get("assigned_by") or "HR",
+                "priority": item.get("priority", "Medium"),
+                "subtasks": item.get("subtasks", []),
+                "comments": item.get("comments", []), 
+                "files": item.get("files", []),
             }
             result = Tasks.insert_one(task_entry)
             task_id = str(result.inserted_id)
@@ -2257,7 +3274,7 @@ def get_manager_hr_assigned_tasks(userid: str, date: str = None):
     return task_list
 
 def get_hr_self_assigned_tasks(userid: str, date: str = None):
-    # HR should only see tasks they assigned to themselves
+    # HR should see their self-assigned tasks
     query = {"userid": userid, "assigned_by": "self"}
     if date:
         query["date"] = date  
@@ -2265,7 +3282,6 @@ def get_hr_self_assigned_tasks(userid: str, date: str = None):
     tasks = list(Tasks.find(query))
     task_list = []
     for task in tasks:
-        # Handle files consistently - convert _id to id
         files = []
         for file in task.get("files", []):
             if isinstance(file, dict) and '_id' in file:
@@ -2363,6 +3379,14 @@ def get_role_based_action_url(userid, notification_type, base_path=None):
             'task_due_soon': {
                 'admin': '/admin/task',
                 'user': '/User/task'
+            },
+            'manager_task': {
+                'admin': '/admin/task',
+                'user': '/User/task'
+            },
+            'hr_task': {
+                'admin': '/admin/task',
+                'user': '/admin/task'  # HR users should see admin task view
             },
             
             # Leave-related notifications
@@ -3545,13 +4569,32 @@ async def create_task_updated_notification(userid, task_title, updater_name, cha
         return None
 
 async def create_task_manager_assigned_notification(userid, task_title, manager_name, task_id=None, due_date=None, priority="high"):
-    """Create specific notification when a manager assigns a task"""
+    """Create specific notification when someone assigns a task"""
     try:
         user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
         user_name = user.get("name", "User") if user else "User"
         
-        title = "Task Assigned by Manager"
-        message = f"Hi {user_name}, your manager {manager_name} has assigned you a new task: '{task_title}'"
+        # Get assigner's information to determine their role
+        assigner = None
+        if ObjectId.is_valid(manager_name):
+            assigner = Users.find_one({"_id": ObjectId(manager_name)})
+        else:
+            assigner = Users.find_one({"name": manager_name})
+        
+        assigner_name = assigner.get("name", manager_name) if assigner else manager_name
+        assigner_role = assigner.get("position", "Manager") if assigner else "Manager"
+        
+        # Create appropriate title based on assigner's role
+        if assigner_role.upper() == "HR":
+            title = "Task Assigned by HR"
+            message = f"Hi {user_name}, HR {assigner_name} has assigned you a new task: '{task_title}'"
+        elif assigner_role.upper() == "MANAGER":
+            title = "Task Assigned by Manager"
+            message = f"Hi {user_name}, your manager {assigner_name} has assigned you a new task: '{task_title}'"
+        else:
+            title = f"Task Assigned by {assigner_role}"
+            message = f"Hi {user_name}, {assigner_name} ({assigner_role}) has assigned you a new task: '{task_title}'"
+        
         if due_date:
             message += f". Due date: {due_date}"
         
@@ -3565,8 +4608,9 @@ async def create_task_manager_assigned_notification(userid, task_title, manager_
             related_id=task_id,
             metadata={
                 "task_title": task_title,
-                "action": "Assigned by Manager",
-                "manager_name": manager_name,
+                "action": f"Assigned by {assigner_role}",
+                "assigner_name": assigner_name,
+                "assigner_role": assigner_role,
                 "due_date": due_date
             }
         )
@@ -4218,3 +5262,1105 @@ async def auto_notify_admin_on_manager_wfh_request():
     except Exception as e:
         print(f"❌ Error in auto admin WFH notification: {e}")
         return False
+
+# Holiday and Working Days Management (already in your code)
+def insert_holidays(year: int, holidays: list):
+    """Insert or update holidays for a given year"""
+    holidays_collection.update_one(
+        {"year": year},
+        {"$set": {"year": year, "holidays": holidays}},
+        upsert=True
+    )
+    return {"message": f"Holidays updated for {year}"}
+
+def get_holidays(year: int):
+    """Fetch holidays for a given year"""
+    return holidays_collection.find_one({"year": year})
+
+def calculate_working_days(year: int, holidays: list):
+    """Calculate working days for a year excluding Sundays and holidays"""
+    start = datetime(year, 1, 1)
+    end = datetime(year, 12, 31)
+    delta = timedelta(days=1)
+    
+    working_days = []
+    current = start
+    
+    holiday_dates = {h["date"] for h in holidays}
+    
+    while current <= end:
+        is_sunday = current.weekday() == 6  # 6 = Sunday
+        is_holiday = current.strftime("%Y-%m-%d") in holiday_dates
+        if not is_sunday and not is_holiday:
+            working_days.append(current.strftime("%Y-%m-%d"))
+        current += delta
+    
+    return working_days
+
+def get_working_days_count_till_date(year: int, till_date: date = None):
+    """Get working days count from start of year till specified date (or today)"""
+    if till_date is None:
+        till_date = date.today()
+    
+    holiday_doc = get_holidays(year)
+    if not holiday_doc:
+        return 0
+    
+    holidays = holiday_doc["holidays"]
+    holiday_dates = {h["date"] for h in holidays}
+    
+    start = datetime(year, 1, 1).date()
+    end = min(till_date, datetime(year, 12, 31).date())
+    
+    working_days_count = 0
+    current = start
+    
+    while current <= end:
+        is_sunday = current.weekday() == 6
+        is_holiday = current.strftime("%Y-%m-%d") in holiday_dates
+        if not is_sunday and not is_holiday:
+            working_days_count += 1
+        current += timedelta(days=1)
+    
+    return working_days_count
+
+# New Attendance Calculation Functions
+
+def calculate_user_attendance_stats(userid: str, year: int = None):
+    """Calculate attendance statistics for a specific user"""
+    if year is None:
+        year = date.today().year
+    
+    # Get user info to get username
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}, {"name": 1})
+        username = user.get("name", "Unknown") if user else "Unknown"
+    except Exception as e:
+        print(f"Error fetching user info for {userid}: {e}")
+        username = "Unknown"
+    
+    # Get total working days till today
+    total_working_days = get_working_days_count_till_date(year)
+    
+    if total_working_days == 0:
+        return {
+            "userid": userid,
+            "username": username,
+            "year": year,
+            "total_working_days": 0,
+            "present_days": 0,
+            "attendance_percentage": 0,
+            "leave_days_taken": 0,
+            "leave_percentage": 0,
+            "last_updated": datetime.now()
+        }
+    
+    # Count present days (where status is "Present" or "Late")
+    start_date = f"{year}-01-01"
+    end_date = f"{year}-12-31"
+    
+    present_days = Clock.count_documents({
+        "userid": userid,
+        "date": {
+            "$gte": start_date,
+            "$lte": end_date
+        },
+        "status": {"$in": ["Present", "Late"]}
+    })
+    
+    # Count leave days taken (approved leaves)
+    leave_days = Leave.count_documents({
+        "userid": userid,
+        "status": "Approved",
+        "selectedDate": {
+            "$gte": datetime(year, 1, 1),
+            "$lte": datetime(year, 12, 31)
+        }
+    })
+    
+    # Calculate multi-day leaves (LOP/Other Leave)
+    multi_day_leaves = Leave.find({
+        "userid": userid,
+        "status": "Approved",
+        "leaveType": "Other Leave",
+        "selectedDate": {
+            "$gte": datetime(year, 1, 1),
+            "$lte": datetime(year, 12, 31)
+        }
+    })
+    
+    additional_leave_days = 0
+    for leave in multi_day_leaves:
+        if "ToDate" in leave:
+            from_date = leave["selectedDate"]
+            to_date = leave["ToDate"]
+            # Count weekdays between from_date and to_date
+            current = from_date
+            while current <= to_date:
+                if current.weekday() != 6:  # Not Sunday
+                    additional_leave_days += 1
+                current += timedelta(days=1)
+    
+    total_leave_days = leave_days + additional_leave_days
+    
+    # Calculate percentages
+    attendance_percentage = round((present_days / total_working_days) * 100, 2) if total_working_days > 0 else 0
+    leave_percentage = round((total_leave_days / total_working_days) * 100, 2) if total_working_days > 0 else 0
+    
+    stats = {
+        "userid": userid,
+        "username": username,
+        "year": year,
+        "total_working_days": total_working_days,
+        "present_days": present_days,
+        "attendance_percentage": attendance_percentage,
+        "leave_days_taken": total_leave_days,
+        "leave_percentage": leave_percentage,
+        "last_updated": datetime.now()
+    }
+    
+    # Cache the stats
+    AttendanceStats.update_one(
+        {"userid": userid, "year": year},
+        {"$set": stats},
+        upsert=True
+    )
+    
+    return stats
+
+def get_user_attendance_dashboard(userid: str):
+    """Get attendance dashboard for individual user"""
+    current_year = date.today().year
+    stats = calculate_user_attendance_stats(userid, current_year)
+    
+    # Get user info for display
+    user = Users.find_one({"_id": ObjectId(userid)}, {"name": 1, "email": 1, "department": 1, "position": 1})
+    
+    return {
+        "user_info": {
+            "userid": userid,
+            "name": user.get("name", "Unknown") if user else "Unknown",
+            "email": user.get("email", "") if user else "",
+            "department": user.get("department", "") if user else "",
+            "position": user.get("position", "") if user else ""
+        },
+        "attendance_stats": stats,
+        "year": current_year
+    }
+
+def get_team_attendance_stats(team_leader: str, year: int = None):
+    """Get attendance statistics for all team members under a team leader"""
+    if year is None:
+        year = date.today().year
+    
+    # Get team members
+    team_members = list(Users.find(
+        {"TL": team_leader, "position": {"$ne": "Manager"}},
+        {"_id": 1, "name": 1, "email": 1, "department": 1, "position": 1}
+    ))
+    
+    team_stats = []
+    total_attendance = 0
+    
+    for member in team_members:
+        userid = str(member["_id"])
+        stats = calculate_user_attendance_stats(userid, year)
+        stats["user_info"] = {
+            "name": member.get("name"),
+            "email": member.get("email"),
+            "department": member.get("department"),
+            "position": member.get("position")
+        }
+        team_stats.append(stats)
+        total_attendance += stats["attendance_percentage"]
+    
+    average_attendance = round(total_attendance / len(team_members), 2) if team_members else 0
+    
+    return {
+        "team_leader": team_leader,
+        "year": year,
+        "team_size": len(team_members),
+        "average_attendance": average_attendance,
+        "team_stats": team_stats
+    }
+
+def get_department_attendance_stats(department: str = None, year: int = None):
+    """Get attendance statistics for a department or all employees (for admin)"""
+    if year is None:
+        year = date.today().year
+    
+    # Build query based on role
+    query = {"position": {"$ne": "Admin"}}
+    if department:
+        query["department"] = department
+    
+    employees = list(Users.find(query, {"_id": 1, "name": 1, "email": 1, "department": 1, "position": 1, "TL": 1}))
+    
+    all_stats = []
+    total_attendance = 0
+    department_stats = {}
+    
+    for employee in employees:
+        userid = str(employee["_id"])
+        stats = calculate_user_attendance_stats(userid, year)
+        stats["user_info"] = {
+            "name": employee.get("name"),
+            "email": employee.get("email"),
+            "department": employee.get("department"),
+            "position": employee.get("position"),
+            "team_leader": employee.get("TL", "")
+        }
+        all_stats.append(stats)
+        total_attendance += stats["attendance_percentage"]
+        
+        # Group by department for admin view
+        dept = employee.get("department", "Unknown")
+        if dept not in department_stats:
+            department_stats[dept] = {"total": 0, "count": 0, "employees": []}
+        department_stats[dept]["total"] += stats["attendance_percentage"]
+        department_stats[dept]["count"] += 1
+        department_stats[dept]["employees"].append(stats)
+    
+    # Calculate department averages
+    for dept in department_stats:
+        department_stats[dept]["average_attendance"] = round(
+            department_stats[dept]["total"] / department_stats[dept]["count"], 2
+        ) if department_stats[dept]["count"] > 0 else 0
+    
+    overall_average = round(total_attendance / len(employees), 2) if employees else 0
+    
+    return {
+        "year": year,
+        "total_employees": len(employees),
+        "overall_average_attendance": overall_average,
+        "department_wise_stats": department_stats,
+        "all_employee_stats": all_stats
+    }
+
+def get_manager_team_attendance(manager_userid: str, year: int = None):
+    """Get attendance stats for all teams under a manager"""
+    if year is None:
+        year = date.today().year
+    
+    # Get all team leaders under this manager
+    team_leaders = list(Users.find(
+        {"position": "TL", "manager": manager_userid},  # Assuming TLs have manager field
+        {"_id": 1, "name": 1}
+    ))
+    
+    if not team_leaders:
+        # If no specific TL structure, get all non-manager employees
+        return get_department_attendance_stats(year=year)
+    
+    manager_stats = {
+        "manager_userid": manager_userid,
+        "year": year,
+        "teams": [],
+        "overall_average": 0
+    }
+    
+    total_attendance = 0
+    total_employees = 0
+    
+    for tl in team_leaders:
+        tl_name = tl["name"]
+        team_stats = get_team_attendance_stats(tl_name, year)
+        manager_stats["teams"].append(team_stats)
+        total_attendance += team_stats["average_attendance"] * team_stats["team_size"]
+        total_employees += team_stats["team_size"]
+    
+    manager_stats["overall_average"] = round(total_attendance / total_employees, 2) if total_employees > 0 else 0
+    manager_stats["total_employees"] = total_employees
+    
+    return manager_stats
+
+# Daily update function to recalculate stats
+def update_daily_attendance_stats():
+    """Run this daily to update attendance statistics for all users"""
+    current_year = date.today().year
+    
+    # Get all active users
+    users = Users.find({"status": {"$ne": "Inactive"}}, {"_id": 1})
+    
+    updated_count = 0
+    for user in users:
+        userid = str(user["_id"])
+        try:
+            calculate_user_attendance_stats(userid, current_year)
+            updated_count += 1
+        except Exception as e:
+            print(f"Error updating stats for user {userid}: {e}")
+    
+    print(f"Updated attendance stats for {updated_count} users")
+    return updated_count
+def append_chat_message(chatId: str, message: dict):
+    message_doc = message.copy()
+    message_doc["chatId"] = chatId
+    message_doc["timestamp"] = datetime.utcnow() + "Z" # ensure we can sort later
+    chats_collection.insert_one(message_doc)
+
+def get_chat_history(chatId: str):
+    cursor = chats_collection.find({"chatId": chatId}).sort("timestamp", 1)
+    messages = []
+    for doc in cursor:
+        messages.append({
+            "id": str(doc.get("id") or doc.get("_id")),
+            "from_user": doc.get("from_user"),
+            "to_user": doc.get("to_user"),
+            "text": doc.get("text"),
+            "file": doc.get("file"),
+            "timestamp": doc["timestamp"].isoformat() + "Z",
+            "chatId": doc.get("chatId"),
+        })
+    return messages
+
+
+    # Get allowed contacts for a given user
+def get_allowed_contacts(user_id: str):
+    user = Users.find_one({"id": user_id}, {"_id": 0})
+
+    if not user:
+        return []
+
+    if user.get("role") == "manager":
+        # Leader can chat with all their team members
+        return get_team_members(user["id"])
+    else:
+        # Employee can only chat with their team leader
+        TL_id = user.get("TL")
+        if not TL_id:
+            return []
+        manager = Users.find_one({"id": TL_id}, {"_id": 0})
+        return [manager] if manager else []
+
+def get_user_info(userid):
+    result = Users.find_one({"userid":userid},{"_id":0,"password":0})
+    return result
+def get_user_info(userid):
+ result = Users.find_one({"$or":[{"userid":userid}]},{"_id":0,"password":0})
+ return result
+# Assign document to multiple users
+def assign_docs(doc_name: str, user_ids: list[str], assigned_by: str):
+    for uid in user_ids:
+        Users.update_one(
+            {"userid": uid},
+            {"$push": {"assigned_docs": {
+                "doc_type": doc_name,
+                "status": "Pending",
+                "file_id": None,
+                "assigned_by": assigned_by,   # <-- who assigned
+                "assigned_at": datetime.utcnow()
+            }}}
+        )
+    return len(user_ids)
+
+
+# Save uploaded file
+from bson.binary import Binary
+
+def save_file_to_db(file_data: bytes, filename: str, content_type: str, userid: str, doc_name: str):
+    try:
+        # Insert file into files_collection
+        file_doc = {
+            "userid": userid,
+            "docName": doc_name,
+            "filename": filename,
+            "filetype": content_type,
+            "data": Binary(file_data),
+            "status": "Uploaded",
+            "uploaded_at": datetime.utcnow()
+        }
+        result = files_collection.insert_one(file_doc)
+        file_id = str(result.inserted_id)
+
+        # Update assigned_docs in Users collection
+        Users.update_one(
+            {"userid": userid, "assigned_docs.doc_type": doc_name},
+            {"$set": {"assigned_docs.$.status": "Uploaded", "assigned_docs.$.file_id": file_id}}
+        )
+
+        return file_id
+
+    except Exception as e:
+        print("Error storing file in MongoDB:", e)
+        return None
+
+# Get all assigned docs
+def get_assigned_docs():
+    result = []
+    for user in Users.find():
+        for doc in user.get("assigned_docs", []):
+            result.append({
+                "userid": user["userid"],
+                "docName": doc["doc_type"],
+                "status": doc.get("status", "Pending"),
+                "fileUrl": f"/download/{doc.get('file_id')}" if doc.get("file_id") else None,
+                "assigned_by": doc.get("assigned_by"),
+                "assigned_at": doc.get("assigned_at")
+            })
+    return result
+
+# Update file review status
+def update_file_status(file_id: str, status: str, remarks: str = None):
+    files_collection.update_one(
+        {"_id": ObjectId(file_id)},
+        {"$set": {"status": status, "remarks": remarks}}
+    )
+    # Also update in user's assigned_docs
+    Users.update_one(
+        {"assigned_docs.file_id": file_id},
+        {"$set": {"assigned_docs.$.status": status}}
+    )
+
+# ===============================
+# ENHANCED TASK NOTIFICATION SYSTEM
+# ===============================
+
+async def create_task_creation_notification(userid, task_title, task_id=None, priority="medium", created_by=None):
+    """Task creation → Creation confirmation"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Created Successfully"
+        message = f"Hi {user_name}, your task '{task_title}' has been created successfully."
+        if created_by and created_by != userid:
+            creator = Users.find_one({"_id": ObjectId(created_by)}) if ObjectId.is_valid(created_by) else None
+            creator_name = creator.get("name", "Manager") if creator else "Manager"
+            message = f"Hi {user_name}, a new task '{task_title}' has been created for you by {creator_name}."
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Created",
+                "created_by": created_by
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating task creation notification: {e}")
+        return None
+
+async def create_manager_assignment_notification(manager_id, task_title, assignee_name, task_id=None, priority="medium"):
+    """Manager assignment → Assignment notification with details"""
+    try:
+        manager = Users.find_one({"_id": ObjectId(manager_id)}) if ObjectId.is_valid(manager_id) else None
+        manager_name = manager.get("name", "Manager") if manager else "Manager"
+        
+        title = "Task Assignment Confirmed"
+        message = f"Hi {manager_name}, you have successfully assigned the task '{task_title}' to {assignee_name}."
+        
+        notification_id = create_notification(
+            userid=manager_id,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(manager_id, "manager_task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Assigned",
+                "assignee_name": assignee_name
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(manager_id, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating manager assignment notification: {e}")
+        return None
+
+async def create_task_update_notification(userid, task_title, changes, task_id=None, priority="medium", updated_by=None):
+    """Task updates → Update notifications with changes"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Updated"
+        change_details = []
+        
+        if "status" in changes:
+            change_details.append(f"status to {changes['status']}")
+        if "priority" in changes:
+            change_details.append(f"priority to {changes['priority']}")
+        if "due_date" in changes:
+            change_details.append(f"due date to {changes['due_date']}")
+        if "task" in changes:
+            change_details.append("task description")
+        
+        changes_text = ", ".join(change_details) if change_details else "task details"
+        message = f"Hi {user_name}, your task '{task_title}' has been updated. Changes: {changes_text}"
+        
+        if updated_by and updated_by != userid:
+            updater = Users.find_one({"_id": ObjectId(updated_by)}) if ObjectId.is_valid(updated_by) else None
+            updater_name = updater.get("name", "Manager") if updater else "Manager"
+            message += f" (Updated by {updater_name})"
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Updated",
+                "changes": changes,
+                "updated_by": updated_by
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating task update notification: {e}")
+        return None
+
+async def create_subtask_assignment_notification(userid, task_title, subtask_text, task_id=None, priority="medium", assigned_by=None):
+    """Subtask assignment → Individual subtask notifications"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Subtask Added"
+        message = f"Hi {user_name}, a new subtask '{subtask_text}' has been added to your task '{task_title}'."
+        
+        if assigned_by and assigned_by != userid:
+            assigner = Users.find_one({"_id": ObjectId(assigned_by)}) if ObjectId.is_valid(assigned_by) else None
+            assigner_name = assigner.get("name", "Manager") if assigner else "Manager"
+            message += f" (Added by {assigner_name})"
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Subtask Added",
+                "subtask_text": subtask_text,
+                "assigned_by": assigned_by
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating subtask assignment notification: {e}")
+        return None
+
+async def create_comment_notification(userid, task_title, comment_text, task_id=None, priority="medium", commented_by=None):
+    """Comments added → Real-time comment alerts"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        commenter = Users.find_one({"_id": ObjectId(commented_by)}) if ObjectId.is_valid(commented_by) else None
+        commenter_name = commenter.get("name", "Team Member") if commenter else "Team Member"
+        
+        title = "Task Comment Added"
+        message = f"Hi {user_name}, {commenter_name} has added a comment to your task '{task_title}': '{comment_text[:100]}{'...' if len(comment_text) > 100 else ''}'"
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Comment Added",
+                "comment_text": comment_text,
+                "commented_by": commented_by,
+                "commenter_name": commenter_name
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating comment notification: {e}")
+        return None
+
+async def create_file_upload_notification(userid, task_title, filename, task_id=None, priority="medium", uploaded_by=None):
+    """File uploads → File attachment notifications"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        uploader = Users.find_one({"_id": ObjectId(uploaded_by)}) if ObjectId.is_valid(uploaded_by) else None
+        uploader_name = uploader.get("name", "Team Member") if uploader else "Team Member"
+        
+        title = "File Uploaded"
+        message = f"Hi {user_name}, {uploader_name} has uploaded a file '{filename}' to your task '{task_title}'."
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "File Uploaded",
+                "filename": filename,
+                "uploaded_by": uploaded_by,
+                "uploader_name": uploader_name
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating file upload notification: {e}")
+        return None
+
+async def create_status_change_notification(userid, task_title, old_status, new_status, task_id=None, priority="medium", changed_by=None):
+    """Status changes → Progress tracking notifications"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Status Updated"
+        message = f"Hi {user_name}, your task '{task_title}' status has been changed from '{old_status}' to '{new_status}'."
+        
+        if changed_by and changed_by != userid:
+            changer = Users.find_one({"_id": ObjectId(changed_by)}) if ObjectId.is_valid(changed_by) else None
+            changer_name = changer.get("name", "Manager") if changer else "Manager"
+            message += f" (Changed by {changer_name})"
+        
+        # Set priority based on status
+        if new_status.lower() in ["completed", "done"]:
+            priority = "high"
+        elif new_status.lower() in ["in progress", "started"]:
+            priority = "medium"
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Status Changed",
+                "old_status": old_status,
+                "new_status": new_status,
+                "changed_by": changed_by
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating status change notification: {e}")
+        return None
+
+def get_hr_users():
+    """Get all HR users from the database"""
+    try:
+        hr_users = list(Users.find({
+            "$or": [
+                {"position": "HR"},
+                {"position": {"$regex": "HR", "$options": "i"}},
+                {"department": "HR"},
+                {"department": {"$regex": "HR", "$options": "i"}}
+            ]
+        }))
+        return hr_users
+    except Exception as e:
+        print(f"Error fetching HR users: {e}")
+        return []
+
+def get_user_role(user_id):
+    """Get user role/position to determine notification hierarchy"""
+    try:
+        user = Users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+        if user:
+            return user.get("position", "").lower()
+        return None
+    except Exception as e:
+        print(f"Error getting user role: {e}")
+        return None
+
+async def create_task_completion_notification(assignee_id, manager_id, task_title, assignee_name, task_id=None, priority="high"):
+    """Enhanced Task completion → Hierarchy-based completion alerts
+    - Employee task completion → Notify Manager
+    - Manager task completion → Notify HR
+    """
+    try:
+        notifications_sent = []
+        
+        # Get assignee role to determine notification hierarchy
+        assignee_role = get_user_role(assignee_id)
+        
+        if assignee_role == "manager":
+            # Manager completed task → Notify HR
+            hr_users = get_hr_users()
+            
+            for hr_user in hr_users:
+                hr_id = str(hr_user["_id"])
+                hr_name = hr_user.get("name", "HR")
+                
+                title = "Manager Task Completed"
+                message = f"Hi {hr_name}, Manager {assignee_name} has completed the task '{task_title}'. Please review the work."
+                
+                notification_id = create_notification(
+                    userid=hr_id,
+                    title=title,
+                    message=message,
+                    notification_type="task",
+                    priority=priority,
+                    action_url=get_role_based_action_url(hr_id, "hr_task"),
+                    related_id=task_id,
+                    metadata={
+                        "task_title": task_title,
+                        "action": "Completed",
+                        "assignee_name": assignee_name,
+                        "assignee_role": "Manager",
+                        "notification_hierarchy": "manager_to_hr"
+                    }
+                )
+                
+                # Send WebSocket notification
+                from websocket_manager import notification_manager
+                await notification_manager.send_personal_notification(hr_id, {
+                    "_id": notification_id,
+                    "title": title,
+                    "message": message,
+                    "type": "task",
+                    "priority": priority
+                })
+                
+                notifications_sent.append(notification_id)
+                print(f"✅ HR {hr_name} notified about Manager {assignee_name}'s task completion: {task_title}")
+        
+        else:
+            # Employee completed task → Notify Manager (existing logic)
+            if manager_id:
+                manager = Users.find_one({"_id": ObjectId(manager_id)}) if ObjectId.is_valid(manager_id) else None
+                manager_name = manager.get("name", "Manager") if manager else "Manager"
+                
+                title = "Task Completed"
+                message = f"Hi {manager_name}, {assignee_name} has completed the task '{task_title}'. Please review the work."
+                
+                notification_id = create_notification(
+                    userid=manager_id,
+                    title=title,
+                    message=message,
+                    notification_type="task",
+                    priority=priority,
+                    action_url=get_role_based_action_url(manager_id, "manager_task"),
+                    related_id=task_id,
+                    metadata={
+                        "task_title": task_title,
+                        "action": "Completed",
+                        "assignee_name": assignee_name,
+                        "assignee_role": assignee_role or "Employee",
+                        "notification_hierarchy": "employee_to_manager"
+                    }
+                )
+                
+                # Send WebSocket notification
+                from websocket_manager import notification_manager
+                await notification_manager.send_personal_notification(manager_id, {
+                    "_id": notification_id,
+                    "title": title,
+                    "message": message,
+                    "type": "task",
+                    "priority": priority
+                })
+                
+                notifications_sent.append(notification_id)
+                print(f"✅ Manager {manager_name} notified about {assignee_name}'s task completion: {task_title}")
+        
+        return notifications_sent
+    except Exception as e:
+        print(f"Error creating task completion notification: {e}")
+        return []
+
+async def create_deadline_approach_notification(userid, task_title, days_remaining, task_id=None, priority="high"):
+    """Deadline approach → Smart reminder system"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Deadline Approaching"
+        if days_remaining == 0:
+            message = f"Hi {user_name}, your task '{task_title}' is due today! Please complete it as soon as possible."
+            priority = "critical"
+        elif days_remaining == 1:
+            message = f"Hi {user_name}, your task '{task_title}' is due tomorrow. Please ensure it's completed on time."
+            priority = "high"
+        else:
+            message = f"Hi {user_name}, your task '{task_title}' is due in {days_remaining} days. Please plan accordingly."
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Deadline Approaching",
+                "days_remaining": days_remaining
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating deadline approach notification: {e}")
+        return None
+
+async def create_overdue_task_notification(userid, task_title, days_overdue, task_id=None, priority="critical"):
+    """Overdue tasks → Automatic overdue notifications"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Overdue"
+        if days_overdue == 1:
+            message = f"Hi {user_name}, your task '{task_title}' is 1 day overdue. Please complete it immediately."
+        else:
+            message = f"Hi {user_name}, your task '{task_title}' is {days_overdue} days overdue. This requires immediate attention."
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Overdue",
+                "days_overdue": days_overdue
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating overdue task notification: {e}")
+        return None
+
+# Helper function to notify all relevant parties about task events
+async def notify_task_stakeholders(task_data, action, **kwargs):
+    """Notify all relevant stakeholders about task events"""
+    try:
+        task_id = task_data.get("_id")
+        task_title = task_data.get("task", "Unknown Task")
+        userid = task_data.get("userid")
+        assigned_by = task_data.get("assigned_by")
+        
+        # Get user details
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        # Get manager/assigner details
+        manager = None
+        if assigned_by and assigned_by != "self" and assigned_by != "HR":
+            manager = Users.find_one({"_id": ObjectId(assigned_by)}) if ObjectId.is_valid(assigned_by) else None
+        
+        notifications_sent = []
+        
+        if action == "created":
+            # Notify the assignee
+            notification_id = await create_task_creation_notification(
+                userid=userid,
+                task_title=task_title,
+                task_id=str(task_id),
+                created_by=kwargs.get("created_by")
+            )
+            notifications_sent.append(notification_id)
+            
+            # Notify manager if task was assigned by someone else
+            if manager and kwargs.get("created_by") != userid:
+                manager_notification_id = await create_manager_assignment_notification(
+                    manager_id=assigned_by,
+                    task_title=task_title,
+                    assignee_name=user_name,
+                    task_id=str(task_id)
+                )
+                notifications_sent.append(manager_notification_id)
+        
+        elif action == "updated":
+            # Notify the assignee
+            notification_id = await create_task_update_notification(
+                userid=userid,
+                task_title=task_title,
+                changes=kwargs.get("changes", {}),
+                task_id=str(task_id),
+                updated_by=kwargs.get("updated_by")
+            )
+            notifications_sent.append(notification_id)
+            
+            # If status changed to completed, notify appropriate authority based on hierarchy
+            if kwargs.get("changes", {}).get("status") in ["Completed", "Done", "completed", "done"]:
+                completion_notification_ids = await create_task_completion_notification(
+                    assignee_id=userid,
+                    manager_id=assigned_by if manager else None,
+                    task_title=task_title,
+                    assignee_name=user_name,
+                    task_id=str(task_id)
+                )
+                if completion_notification_ids:
+                    notifications_sent.extend(completion_notification_ids)
+        
+        elif action == "comment_added":
+            # Notify task owner if comment is by someone else
+            if kwargs.get("commented_by") != userid:
+                notification_id = await create_comment_notification(
+                    userid=userid,
+                    task_title=task_title,
+                    comment_text=kwargs.get("comment_text", ""),
+                    task_id=str(task_id),
+                    commented_by=kwargs.get("commented_by")
+                )
+                notifications_sent.append(notification_id)
+            
+            # Notify manager if they exist and didn't make the comment
+            if manager and kwargs.get("commented_by") != assigned_by:
+                notification_id = await create_comment_notification(
+                    userid=assigned_by,
+                    task_title=task_title,
+                    comment_text=kwargs.get("comment_text", ""),
+                    task_id=str(task_id),
+                    commented_by=kwargs.get("commented_by")
+                )
+                notifications_sent.append(notification_id)
+        
+        elif action == "file_uploaded":
+            # Notify task owner if file uploaded by someone else
+            if kwargs.get("uploaded_by") != userid:
+                notification_id = await create_file_upload_notification(
+                    userid=userid,
+                    task_title=task_title,
+                    filename=kwargs.get("filename", "file"),
+                    task_id=str(task_id),
+                    uploaded_by=kwargs.get("uploaded_by")
+                )
+                notifications_sent.append(notification_id)
+            
+            # Notify manager if they exist and didn't upload the file
+            if manager and kwargs.get("uploaded_by") != assigned_by:
+                notification_id = await create_file_upload_notification(
+                    userid=assigned_by,
+                    task_title=task_title,
+                    filename=kwargs.get("filename", "file"),
+                    task_id=str(task_id),
+                    uploaded_by=kwargs.get("uploaded_by")
+                )
+                notifications_sent.append(notification_id)
+        
+        return notifications_sent
+    except Exception as e:
+        print(f"Error notifying task stakeholders: {e}")
+        return []

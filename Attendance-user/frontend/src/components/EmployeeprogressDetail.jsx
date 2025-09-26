@@ -518,9 +518,9 @@ const EmployeeprogressDetail = () => {
                          {task.subtasks.map((subtask, index) => (
                            <div key={`subtask-${subtask.id}-${index}`} className="flex items-start justify-between gap-3 p-3 bg-gray-50 rounded-lg">
                                <div className="flex gap-3 flex-1 min-w-0">
-                                   <span className={`text-lg ${subtask.completed ? 'text-green-500' : 'text-gray-400'}`}>
-                               {subtask.completed ? <FaCheckCircle /> : <FaRegCircle />}
-                             </span>
+                                    <span className={`text-lg ${subtask.completed ? 'text-green-500' : 'text-gray-400'}`}>
+                                {subtask.completed && <FaCheckCircle />}
+                              </span>
                             <p className="text-sm text-gray-800 break-words whitespace-normal min-w-0">
                                 {subtask.text}
                               </p>

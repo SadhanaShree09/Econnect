@@ -288,6 +288,8 @@ const handleApplyButtonClick = () => {
         return;
       }
 
+  // Already formatted as YYYY-MM-DD above, no need to reformat
+
       newLeave = {
         leaveType,
         selectedDate: formattedSelectedDate,
@@ -297,24 +299,14 @@ const handleApplyButtonClick = () => {
     } else if (leaveType === "Other Leave") {
       let formattedFromDate, formattedToDate;
 
-      // Handle moment objects or Date objects for from date
-      if (moment.isMoment(otherFromDate)) {
-        formattedFromDate = otherFromDate.format("YYYY-MM-DD");
-      } else if (otherFromDate instanceof Date) {
-        formattedFromDate = moment(otherFromDate).format("YYYY-MM-DD");
-      } else {
-        setValidationMessage("Invalid from date selected");
-        return;
+      // Convert otherFromDate to a Date object if it's not already
+      if (!(otherFromDate instanceof Date)) {
+        formattedFromDate = moment(formattedFromDate).format("YYYY-MM-DD");
       }
 
-      // Handle moment objects or Date objects for to date
-      if (moment.isMoment(otherToDate)) {
-        formattedToDate = otherToDate.format("YYYY-MM-DD");
-      } else if (otherToDate instanceof Date) {
-        formattedToDate = moment(otherToDate).format("YYYY-MM-DD");
-      } else {
-        setValidationMessage("Invalid to date selected");
-        return;
+      // Convert otherToDate to a Date object if it's not already
+      if (!(otherToDate instanceof Date)) {
+        formattedToDate = moment(formattedToDate).format("YYYY-MM-DD");
       }
 
       newLeave = {
@@ -339,6 +331,8 @@ const handleApplyButtonClick = () => {
         setValidationMessage("Invalid date selected");
         return;
       }
+
+  // Already formatted as YYYY-MM-DD above, no need to reformat
 
       newLeave = {
         leaveType,
