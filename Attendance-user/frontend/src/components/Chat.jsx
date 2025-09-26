@@ -322,8 +322,81 @@ export default function Chat() {
     g.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  // Group creation handler
+  const handleCreateGroup = async () => {
+    if (!groupName.trim() || selectedUsers.length < 2) {
+      toast.error("Enter group name and select at least 2 members");
+      return;
+    }
+    try {
+      const res = await fetch("http://localhost:8000/create_group", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: groupName, members: [userid, ...selectedUsers] }),
+      });
+      if (res.ok) {
+        toast.success("Group created successfully");
+        setShowGroupModal(false);
+        setGroupName("");
+        setSelectedUsers([]);
+        // Refresh groups
+        const groupRes = await fetch(`http://localhost:8000/get_user_groups/${userid}`);
+        if (groupRes.ok) {
+          const data = await groupRes.json();
+          setGroups(data);
+        }
+      } else {
+        toast.error("Failed to create group");
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Error creating group");
+    }
+  };
+
+  // Modal for group creation
+  const GroupModal = () => (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+      <div className="bg-white rounded-xl shadow-lg p-6 w-96 relative">
+        <button className="absolute top-2 right-2 text-gray-500 hover:text-red-500" onClick={() => setShowGroupModal(false)}>&times;</button>
+        <h2 className="text-lg font-bold mb-4">Create Group</h2>
+        <input
+          type="text"
+          className="w-full border rounded px-3 py-2 mb-3"
+          placeholder="Group Name"
+          value={groupName}
+          onChange={e => setGroupName(e.target.value)}
+          autoFocus
+        />
+        <div className="mb-3">
+          <div className="font-semibold mb-1">Select Members:</div>
+          <div className="max-h-40 overflow-y-auto border rounded p-2">
+            {contacts.map(user => (
+              <label key={user.id} className="flex items-center gap-2 mb-1 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={selectedUsers.includes(user.id)}
+                  onChange={e => {
+                    if (e.target.checked) setSelectedUsers(prev => [...prev, user.id]);
+                    else setSelectedUsers(prev => prev.filter(id => id !== user.id));
+                  }}
+                />
+                <span>{user.name}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <button
+          className="w-full bg-blue-600 text-white py-2 rounded font-semibold hover:bg-blue-700"
+          onClick={handleCreateGroup}
+        >Create Group</button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex h-screen w-full font-sans bg-gray-100 overflow-hidden">
+      {showGroupModal && <GroupModal />}
       {/* Sidebar */}
       <div className="w-64 bg-white shadow-lg flex flex-col border-r border-gray-200">
         <div className="p-4 font-bold text-xl flex justify-between items-center border-b border-gray-200">

@@ -465,6 +465,129 @@ async def run_all_automated_checks():
         print(f"❌ Error in run_all_automated_checks: {e}")
         return {"error": str(e)}
 
+# WFH-specific notification triggers to match leave flow
+async def notify_wfh_submitted_to_manager(employee_name, employee_id, request_date_from, request_date_to, manager_id, wfh_id=None):
+    """Notify manager when employee submits WFH request - matches leave submission flow"""
+    try:
+        date_range = f"from {request_date_from} to {request_date_to}" if request_date_from != request_date_to else f"for {request_date_from}"
+        
+        return await create_notification_with_websocket(
+            userid=manager_id,
+            title=f"🏠 New WFH Request: {employee_name}",
+            message=f"{employee_name} has submitted a work from home request {date_range}. Please review and approve.",
+            notification_type="wfh_manager_approval",
+            priority="high",
+            action_url="/manager/wfh-requests",
+            related_id=wfh_id,
+            metadata={
+                "action": "manager_approval_needed",
+                "employee_name": employee_name,
+                "employee_id": employee_id,
+                "request_date_from": request_date_from,
+                "request_date_to": request_date_to,
+                "wfh_id": wfh_id
+            }
+        )
+    except Exception as e:
+        print(f"❌ Error in notify_wfh_submitted_to_manager: {e}")
+        return False
+
+async def notify_wfh_recommended_to_hr(employee_name, employee_id, request_date_from, request_date_to, recommended_by, wfh_id=None):
+    """Notify HR when manager recommends WFH request - matches leave recommendation flow"""
+    try:
+        # Get HR users
+        hr_users = list(Users.find({
+            "$or": [
+                {"position": {"$regex": "HR", "$options": "i"}},
+                {"department": {"$regex": "HR", "$options": "i"}}
+            ]
+        }, {"_id": 1}))
+        
+        date_range = f"from {request_date_from} to {request_date_to}" if request_date_from != request_date_to else f"for {request_date_from}"
+        
+        notifications_sent = 0
+        for hr_user in hr_users:
+            hr_id = str(hr_user["_id"])
+            await create_notification_with_websocket(
+                userid=hr_id,
+                title=f"🏠 WFH Request Recommended: {employee_name}",
+                message=f"{employee_name}'s work from home request {date_range} has been recommended by {recommended_by} for HR approval.",
+                notification_type="wfh_hr_approval",
+                priority="high",
+                action_url="/hr/wfh-requests",
+                related_id=wfh_id,
+                metadata={
+                    "action": "hr_approval_needed",
+                    "employee_name": employee_name,
+                    "employee_id": employee_id,
+                    "request_date_from": request_date_from,
+                    "request_date_to": request_date_to,
+                    "recommended_by": recommended_by,
+                    "wfh_id": wfh_id
+                }
+            )
+            notifications_sent += 1
+        
+        print(f"✅ HR notifications sent for recommended WFH: {employee_name} ({notifications_sent} notifications)")
+        return notifications_sent > 0
+    except Exception as e:
+        print(f"❌ Error in notify_wfh_recommended_to_hr: {e}")
+        return False
+
+async def notify_wfh_approved_to_employee(userid, employee_name, request_date_from, request_date_to, approved_by, wfh_id=None):
+    """Notify employee when WFH is approved - matches leave approval flow"""
+    try:
+        date_range = f"from {request_date_from} to {request_date_to}" if request_date_from != request_date_to else f"for {request_date_from}"
+        
+        return await create_notification_with_websocket(
+            userid=userid,
+            title=f"✅ WFH Request Approved",
+            message=f"Your work from home request {date_range} has been approved by {approved_by}.",
+            notification_type="wfh_approved",
+            priority="medium",
+            action_url="/employee/wfh-status",
+            related_id=wfh_id,
+            metadata={
+                "action": "wfh_approved",
+                "employee_name": employee_name,
+                "request_date_from": request_date_from,
+                "request_date_to": request_date_to,
+                "approved_by": approved_by,
+                "wfh_id": wfh_id
+            }
+        )
+    except Exception as e:
+        print(f"❌ Error in notify_wfh_approved_to_employee: {e}")
+        return False
+
+async def notify_wfh_rejected_to_employee(userid, employee_name, request_date_from, request_date_to, rejected_by, reason=None, wfh_id=None):
+    """Notify employee when WFH is rejected - matches leave rejection flow"""
+    try:
+        date_range = f"from {request_date_from} to {request_date_to}" if request_date_from != request_date_to else f"for {request_date_from}"
+        reason_text = f" Reason: {reason}" if reason else ""
+        
+        return await create_notification_with_websocket(
+            userid=userid,
+            title=f"❌ WFH Request Rejected",
+            message=f"Your work from home request {date_range} has been rejected by {rejected_by}.{reason_text}",
+            notification_type="wfh_rejected",
+            priority="high",
+            action_url="/employee/wfh-status",
+            related_id=wfh_id,
+            metadata={
+                "action": "wfh_rejected",
+                "employee_name": employee_name,
+                "request_date_from": request_date_from,
+                "request_date_to": request_date_to,
+                "rejected_by": rejected_by,
+                "reason": reason,
+                "wfh_id": wfh_id
+            }
+        )
+    except Exception as e:
+        print(f"❌ Error in notify_wfh_rejected_to_employee: {e}")
+        return False
+
 if __name__ == "__main__":
     # Run the automation checks
     asyncio.run(run_all_automated_checks())

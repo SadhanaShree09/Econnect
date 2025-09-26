@@ -1100,6 +1100,16 @@ async def delete_leave_request(item:DeleteLeave):
 
 # Remote Work Request
 
+# TL Page Remote Work Requests (Manager view)
+@app.get("/TL_page_remote_work_requests")
+async def get_TL_page_remote_work_requests(TL: str = Query(..., alias="TL"), show_processed: bool = Query(False, alias="show_processed")):
+    """Get TL page remote work requests with history for a given Team Lead (Manager)"""
+    try:
+        from Mongo import get_TL_page_remote_work_requests_with_history
+        result = get_TL_page_remote_work_requests_with_history(TL, show_processed)
+        return {"remote_work_requests": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/remote-work-request")
 async def remote_work_request(request: RemoteWorkRequest):
@@ -1151,10 +1161,12 @@ async def remote_work_request(request: RemoteWorkRequest):
                     except Exception as admin_notification_error:
                         print(f"⚠️ Admin notification error: {admin_notification_error}")
                 else:
-                    # Regular employee - notify their manager
+                    # Regular employee - notify their manager using improved notification system
                     manager_id = await Mongo.get_user_manager_id(request.userid)
                     if manager_id:
-                        await Mongo.notify_manager_wfh_request(
+                        # Import the improved notification function
+                        from notification_automation import notify_wfh_submitted_to_manager
+                        await notify_wfh_submitted_to_manager(
                             employee_name=request.employeeName,
                             employee_id=request.userid,
                             request_date_from=from_date,
@@ -1294,13 +1306,42 @@ async def update_remote_work_request_status(userid: str = Form(...), status: str
                 wfh_request = Mongo.RemoteWork.find_one({"_id": Mongo.ObjectId(id)})
                 if wfh_request:
                     from_date = wfh_request.get("fromDate")
-                    from_date_str = from_date.strftime("%Y-%m-%d") if from_date else None
+                    from_date_str = from_date.strftime("%d-%m-%Y") if from_date else None
                     
                     if status.lower() == "approved":
-                        await Mongo.notify_wfh_approved(userid, from_date_str, id)
+                        # Import the improved approval notification function
+                        from notification_automation import notify_wfh_approved_to_employee
+                        # Get employee name for better notification
+                        employee_name = wfh_request.get("employeeName", "Employee")
+                        to_date = wfh_request.get("toDate")
+                        to_date_str = to_date.strftime("%d-%m-%Y") if to_date else from_date_str
+                        
+                        await notify_wfh_approved_to_employee(
+                            userid=userid,
+                            employee_name=employee_name,
+                            request_date_from=from_date_str,
+                            request_date_to=to_date_str,
+                            approved_by="HR",
+                            wfh_id=id
+                        )
                         print(f"✅ WFH approved notification sent to user {userid}")
                     elif status.lower() == "rejected":
-                        await Mongo.notify_wfh_rejected(userid, from_date_str, id, reason="Not specified")
+                        # Import the improved rejection notification function  
+                        from notification_automation import notify_wfh_rejected_to_employee
+                        # Get employee name for better notification
+                        employee_name = wfh_request.get("employeeName", "Employee")
+                        to_date = wfh_request.get("toDate")
+                        to_date_str = to_date.strftime("%d-%m-%Y") if to_date else from_date_str
+                        
+                        await notify_wfh_rejected_to_employee(
+                            userid=userid,
+                            employee_name=employee_name,
+                            request_date_from=from_date_str,
+                            request_date_to=to_date_str,
+                            rejected_by="HR",
+                            reason="Not specified",
+                            wfh_id=id
+                        )
                         print(f"✅ WFH rejected notification sent to user {userid}")
             except Exception as notification_error:
                 print(f"⚠️ Notification error: {notification_error}")
@@ -1333,7 +1374,9 @@ async def update_remote_work_request_status(userid: str = Form(...), status: str
                     employee = Mongo.Users.find_one({"_id": Mongo.ObjectId(employee_id)})
                     manager_name = employee.get("TL", "Manager") if employee else "Manager"
                     
-                    await Mongo.notify_hr_recommended_wfh(
+                    # Import the improved HR notification function
+                    from notification_automation import notify_wfh_recommended_to_hr
+                    await notify_wfh_recommended_to_hr(
                         employee_name=employee_name,
                         employee_id=employee_id,
                         request_date_from=from_date_str,
@@ -1342,6 +1385,9 @@ async def update_remote_work_request_status(userid: str = Form(...), status: str
                         wfh_id=id
                     )
                     print(f"✅ HR notification sent for recommended WFH: {employee_name} (recommended by {manager_name})")
+                    
+                else:
+                    print(f"⚠️ WFH request not found for ID: {id}")
             except Exception as notification_error:
                 print(f"⚠️ HR notification error: {notification_error}")
         
@@ -1977,7 +2023,7 @@ async def get_manager_team_remote_work_details(
         # Execute aggregation
         remote_work_details = list(RemoteWork.aggregate(pipeline))
         
-        # Format dates and ObjectIds
+        # Format dates and ObjectId
         for remote_work in remote_work_details:
             remote_work["_id"] = str(remote_work["_id"])
             if "fromDate" in remote_work and remote_work["fromDate"]:
@@ -2285,7 +2331,7 @@ async def get_all_users_remote_work_details(
         # Execute aggregation
         remote_work_details = list(RemoteWork.aggregate(pipeline))
         
-        # Format dates and ObjectIds
+        # Format dates and ObjectId
         for remote_work in remote_work_details:
             remote_work["_id"] = str(remote_work["_id"])
             if "fromDate" in remote_work and remote_work["fromDate"]:
@@ -2488,20 +2534,19 @@ async def get_task_notification_stats(userid: str):
                 except ValueError:
                     continue
         
+        # Get notifications by type
+        notification_types = {}
+        for notification_type in ["task", "leave", "wfh", "attendance", "system"]:
+            count = Mongo.Notifications.count_documents({"userid": userid, "type": notification_type})
+            notification_types[notification_type] = count
+        
         return {
             "userid": userid,
             "total_task_notifications": total_task_notifications,
             "unread_task_notifications": unread_task_notifications,
             "active_tasks": active_tasks,
             "overdue_tasks": overdue_count,
-            "notification_types": {
-                "task_assigned": Mongo.Notifications.count_documents({"userid": userid, "type": "task_manager_assigned"}),
-                "task_created": Mongo.Notifications.count_documents({"userid": userid, "type": "task_created"}),
-                "task_updated": Mongo.Notifications.count_documents({"userid": userid, "type": "task_updated"}),
-                "task_due_soon": Mongo.Notifications.count_documents({"userid": userid, "type": "task_due_soon"}),
-                "task_overdue": Mongo.Notifications.count_documents({"userid": userid, "type": "task_overdue"}),
-                "task_completed": Mongo.Notifications.count_documents({"userid": userid, "type": "task_completed"})
-            }
+            "notification_types": notification_types
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting task notification stats: {str(e)}")
@@ -2621,13 +2666,13 @@ async def upload_task_file(
 
         # Send file upload notifications
         try:
-            task = Mongo.Tasks.find_one({"_id": ObjectId(taskid)})
+            task = Mongo.Tasks.find_one({"_id": Mongo.ObjectId(taskid)})
             if task:
                 task_title = task.get("task", "Task")
                 task_userid = task.get("userid")
                 
                 # Get uploader name
-                uploader = Mongo.Users.find_one({"_id": ObjectId(uploaded_by)}) if ObjectId.is_valid(uploaded_by) else None
+                uploader = Mongo.Users.find_one({"_id": Mongo.ObjectId(uploaded_by)}) if ObjectId.is_valid(uploaded_by) else None
                 uploader_name = uploader.get("name", "Team Member") if uploader else "Team Member"
                 
                 # Notify task owner if file uploaded by someone else
@@ -2807,18 +2852,8 @@ async def task_assign(item: Taskassign):
             if not assigner_user:
                 assigner_user = Users.find_one({"name": t["TL"]})
             assigner_name = assigner_user.get("name", t["TL"]) if assigner_user else t["TL"]
-
-    # Use enhanced version with notifications
-    result = await task_assign_to_multiple_users_with_notification(
-        item.Task_details, 
-        assigner_name=assigner_name,
-        single_notification_per_user=True
-    )
-
-    return {"inserted_ids": result, "message": "Tasks assigned successfully with notifications"}
-
-@app.get("/get_assigned_task")
-def get_assigned_tasks(TL: str = Query(..., alias="TL"), userid: str | None = Query(None, alias = "userid")):
+    TL = item.Task_details[0].get("TL") if item.Task_details and "TL" in item.Task_details[0] else None
+    userid = item.Task_details[0].get("userid") if item.Task_details and "userid" in item.Task_details[0] else None
     result = assigned_task(TL, userid)
     return result
 
