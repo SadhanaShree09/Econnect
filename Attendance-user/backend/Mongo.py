@@ -322,12 +322,10 @@ def Clockin(userid, name, time):
             Clock.insert_one(record)
 
         # Create attendance notification for successful clock-in
-        create_attendance_notification(
-            userid=userid,
-            message=f"Successfully clocked in at {time}. Status: {status}",
-            priority="low",
-            attendance_type="clock_in"
-        )
+            create_attendance_notification(userid=userid,
+                                            message=f"Successfully clocked in at {time}. Status: {status}",
+                                            priority="low",
+                                            attendance_type="clock_in")
 
         return "Clock-in successful"
 
@@ -448,14 +446,7 @@ def Clockout(userid, name, time):
             }}
         )
 
-        # Create attendance notification for successful clock-out
-        create_attendance_notification(
-            userid=userid,
-            message=f"Successfully clocked out at {clockout_time.strftime('%I:%M:%S %p')}. Total work time: {hours_text}",
-            priority="low",
-            attendance_type="clock_out"
-        )
-
+        # (Removed notification for successful clock-out)
         return "Clock-out sucessful"
     else:
         # No clock-in record found for today; prompt user to clock-in first
@@ -1859,20 +1850,105 @@ def add_task_list(task, userid, date, due_date, assigned_by="self",priority="Med
         "subtasks": subtasks or [],
         "comments": comments or [],           # NEW
         "files": files or [],              # NEW
+        "created_at": get_current_timestamp_iso()
 }
     result = Tasks.insert_one(task_entry)
+    
+    # Create notification for task creation
+    try:
+        task_data = task_entry.copy()
+        task_data["_id"] = result.inserted_id
+        
+        # Create sync notification for task creation
+        create_notification(
+            userid=userid,
+            title="Task Created Successfully",
+            message=f"Your task '{task}' has been created successfully.",
+            notification_type="task",
+            priority="medium",
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=str(result.inserted_id),
+            metadata={
+                "task_title": task,
+                "action": "Created",
+                "created_by": assigned_by if assigned_by != "self" else userid
+            }
+        )
+        
+        # If assigned by someone else, notify the assigner too
+        if assigned_by and assigned_by != "self" and assigned_by != userid:
+            create_notification(
+                userid=assigned_by,
+                title="Task Assignment Confirmed",
+                message=f"You have successfully assigned the task '{task}' to a team member.",
+                notification_type="task",
+                priority="medium",
+                action_url=get_role_based_action_url(assigned_by, "manager_task"),
+                related_id=str(result.inserted_id),
+                metadata={
+                    "task_title": task,
+                    "action": "Assigned",
+                    "assignee_id": userid
+                }
+            )
+    except Exception as e:
+        print(f"Error creating task notification: {e}")
+    
     return str(result.inserted_id)
 
-def manager_task_assignment(task:str, userid: str, TL, today, due_date):
-    task = {
+def manager_task_assignment(task:str, userid: str, TL, today, due_date, assigned_by=None, priority="Medium"):
+    task_entry = {
         "task": task,
         "status": "Not completed",
         "date": today,
         "due_date": due_date,
         "userid": userid,
         "TL": TL,
+        "assigned_by": assigned_by or TL,
+        "priority": priority,
+        "subtasks": [],
+        "comments": [],
+        "files": [],
+        "created_at": get_current_timestamp_iso()
     }
-    result = Tasks.insert_one(task)
+    result = Tasks.insert_one(task_entry)
+    
+    # Create notification for task assignment
+    try:
+        # Use the enhanced notification function for the assignee
+        import asyncio
+        asyncio.create_task(create_task_manager_assigned_notification(
+            userid=userid,
+            task_title=task,
+            manager_name=assigned_by or TL,
+            task_id=str(result.inserted_id),
+            due_date=due_date,
+            priority="high"
+        ))
+        
+        # Notify the manager/assigner
+        if assigned_by or TL:
+            manager_id = assigned_by or TL
+            user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+            assignee_name = user.get("name", "Employee") if user else "Employee"
+            
+            create_notification(
+                userid=manager_id,
+                title="Task Assignment Confirmed",
+                message=f"You have successfully assigned the task '{task}' to {assignee_name}.",
+                notification_type="task",
+                priority="medium",
+                action_url=get_role_based_action_url(manager_id, "manager_task"),
+                related_id=str(result.inserted_id),
+                metadata={
+                    "task_title": task,
+                    "action": "Assignment Confirmed",
+                    "assignee_name": assignee_name
+                }
+            )
+    except Exception as e:
+        print(f"Error creating task assignment notification: {e}")
+    
     return str(result.inserted_id)
 
 def edit_the_task(
@@ -1949,10 +2025,697 @@ def edit_the_task(
 
     # Update DB
     if update_fields:
+        # Get current task data before update for comparison
+        current_task = Tasks.find_one({"_id": ObjectId(taskid), "userid": userid})
+        if not current_task:
+            return "Task not found"
+        
         result = Tasks.update_one(
             {"_id": ObjectId(taskid), "userid": userid},
             {"$set": update_fields}
         )
+        
+        if result.matched_count > 0:
+            # Create notifications for task updates
+            try:
+                # Get updated task data
+                updated_task = Tasks.find_one({"_id": ObjectId(taskid)})
+                task_title = updated_task.get("task", "Task") if updated_task else "Task"
+                
+                # Prepare changes for notification
+                changes = {}
+                for field, new_value in update_fields.items():
+                    if field in current_task and current_task[field] != new_value:
+                        changes[field] = new_value
+                
+                # Handle special notifications
+                if "comments" in update_fields and len(update_fields["comments"]) > len(current_task.get("comments", [])):
+                    # New comment added
+                    new_comment = update_fields["comments"][-1]  # Last comment is the new one
+                    comment_text = new_comment.get("text", "")
+                    commented_by = new_comment.get("user", "")  # Use 'user' field from comment
+                    
+                    # Get commenter name - first try to find by name (since comment.user contains name)
+                    commenter = Users.find_one({"name": commented_by}) if commented_by else None
+                    if not commenter and ObjectId.is_valid(commented_by):
+                        commenter = Users.find_one({"_id": ObjectId(commented_by)})
+                    commenter_name = commenter.get("name", commented_by or "Team Member") if commenter else (commented_by or "Team Member")
+                    commenter_id = str(commenter["_id"]) if commenter else None
+                    
+                    # Notify task owner only if they didn't add the comment themselves
+                    if commenter_id != userid:
+                        create_notification(
+                            userid=userid,
+                            title="New Comment Added",
+                            message=f"{commenter_name} added a comment to your task '{task_title}': '{comment_text[:100]}{'...' if len(comment_text) > 100 else ''}'",
+                            notification_type="task",
+                            priority="medium",
+                            action_url=get_role_based_action_url(userid, "task"),
+                            related_id=taskid,
+                            metadata={
+                                "task_title": task_title,
+                                "action": "Comment Added",
+                                "comment_text": comment_text,
+                                "commented_by": commented_by
+                            }
+                        )
+                    
+                    # Also notify the appropriate authority based on hierarchy if the user commented on their own task
+                    if commenter_id == userid:  # User added comment to their own task
+                        # Get commenter role to determine notification hierarchy
+                        commenter_role = get_user_role(commenter_id)
+                        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+                        
+                        if commenter_role == "manager":
+                            # Manager added comment → Notify HR
+                            hr_users = get_hr_users()
+                            
+                            for hr_user in hr_users:
+                                hr_id = str(hr_user["_id"])
+                                hr_name = hr_user.get("name", "HR")
+                                
+                                notification_id = create_notification(
+                                    userid=hr_id,
+                                    title="Manager Comment Added",
+                                    message=f"Manager {commenter_name} added a comment to the task '{task_title}': '{comment_text[:100]}{'...' if len(comment_text) > 100 else ''}'",
+                                    notification_type="task",
+                                    priority="medium",
+                                    action_url=get_role_based_action_url(hr_id, "hr_task"),
+                                    related_id=taskid,
+                                    metadata={
+                                        "task_title": task_title,
+                                        "action": "Comment Added",
+                                        "comment_text": comment_text,
+                                        "commented_by": commented_by,
+                                        "manager_name": commenter_name,
+                                        "manager_id": userid,
+                                        "notification_hierarchy": "manager_to_hr"
+                                    }
+                                )
+                                
+                                # Send real-time WebSocket notification to HR
+                                try:
+                                    from websocket_manager import notification_manager
+                                    import asyncio
+                                    
+                                    # Create async task for WebSocket notification
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        asyncio.create_task(notification_manager.send_personal_notification(hr_id, {
+                                            "_id": notification_id,
+                                            "title": "Manager Comment Added",
+                                            "message": f"Manager {commenter_name} added a comment to the task '{task_title}': '{comment_text[:50]}{'...' if len(comment_text) > 50 else ''}'",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    else:
+                                        loop.run_until_complete(notification_manager.send_personal_notification(hr_id, {
+                                            "_id": notification_id,
+                                            "title": "Manager Comment Added",
+                                            "message": f"Manager {commenter_name} added a comment to the task '{task_title}': '{comment_text[:50]}{'...' if len(comment_text) > 50 else ''}'",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    
+                                    print(f"✅ HR {hr_name} notified about Manager {commenter_name}'s comment: {comment_text[:30]}...")
+                                except Exception as ws_error:
+                                    print(f"Error sending WebSocket notification to HR: {ws_error}")
+                        
+                        else:
+                            # Employee added comment → Notify Manager
+                            # Find the manager who should be notified
+                            manager_to_notify = None
+                            assigned_by = updated_task.get("assigned_by")
+                            tl = updated_task.get("TL")
+                            
+                            # Determine the manager to notify using same logic as task completion
+                            if assigned_by and assigned_by != "self" and assigned_by != userid:
+                                manager_to_notify = assigned_by
+                            elif tl and tl != userid:
+                                manager_to_notify = tl
+                            elif user:
+                                user_tl = user.get("TL")
+                                user_manager = user.get("manager")
+                                if user_tl and user_tl != userid:
+                                    manager_to_notify = user_tl
+                                elif user_manager and user_manager != userid:
+                                    manager_to_notify = user_manager
+                            
+                            # Send notification to manager
+                            if manager_to_notify:
+                                manager = None
+                                if ObjectId.is_valid(manager_to_notify):
+                                    manager = Users.find_one({"_id": ObjectId(manager_to_notify)})
+                                else:
+                                    manager = Users.find_one({"$or": [
+                                        {"name": manager_to_notify},
+                                        {"userid": manager_to_notify}
+                                    ]})
+                                
+                                if manager:
+                                    manager_id = str(manager["_id"])
+                                    manager_name = manager.get("name", "Manager")
+                                    
+                                    notification_id = create_notification(
+                                        userid=manager_id,
+                                        title="Employee Comment Added",
+                                        message=f"{commenter_name} added a comment to the task '{task_title}': '{comment_text[:100]}{'...' if len(comment_text) > 100 else ''}'",
+                                        notification_type="task",
+                                        priority="medium",
+                                        action_url=get_role_based_action_url(manager_id, "manager_task"),
+                                        related_id=taskid,
+                                        metadata={
+                                            "task_title": task_title,
+                                            "action": "Comment Added",
+                                            "comment_text": comment_text,
+                                            "commented_by": commented_by,
+                                            "employee_name": commenter_name,
+                                            "employee_id": userid,
+                                            "notification_hierarchy": "employee_to_manager"
+                                        }
+                                    )
+                                    
+                                    # Send real-time WebSocket notification to manager
+                                    try:
+                                        from websocket_manager import notification_manager
+                                        import asyncio
+                                        
+                                        # Create async task for WebSocket notification
+                                        loop = asyncio.get_event_loop()
+                                        if loop.is_running():
+                                            asyncio.create_task(notification_manager.send_personal_notification(manager_id, {
+                                                "_id": notification_id,
+                                                "title": "Employee Comment Added",
+                                                "message": f"{commenter_name} added a comment to the task '{task_title}': '{comment_text[:50]}{'...' if len(comment_text) > 50 else ''}'",
+                                                "type": "task",
+                                                "priority": "medium"
+                                            }))
+                                        else:
+                                            loop.run_until_complete(notification_manager.send_personal_notification(manager_id, {
+                                                "_id": notification_id,
+                                                "title": "Employee Comment Added",
+                                                "message": f"{commenter_name} added a comment to the task '{task_title}': '{comment_text[:50]}{'...' if len(comment_text) > 50 else ''}'",
+                                                "type": "task",
+                                                "priority": "medium"
+                                            }))
+                                        
+                                        print(f"✅ Manager {manager_name} notified about {commenter_name}'s comment: {comment_text[:30]}...")
+                                    except Exception as ws_error:
+                                        print(f"Error sending WebSocket notification to manager: {ws_error}")
+                                else:
+                                    print(f"⚠️ Manager not found: {manager_to_notify}")
+                            else:
+                                print(f"ℹ️ No manager found to notify for {commenter_name}'s comment")
+                
+                if "files" in update_fields and len(update_fields["files"]) > len(current_task.get("files", [])):
+                    # New file uploaded
+                    new_file = update_fields["files"][-1]  # Last file is the new one
+                    filename = new_file.get("name", "file")
+                    uploaded_by = new_file.get("uploadedBy", "")
+                    
+                    # Extract uploader name from uploadedBy field (format: "Name (Position)")
+                    uploader_name = uploaded_by.split(" (")[0] if " (" in uploaded_by else uploaded_by
+                    
+                    # Find uploader in database to get their ID
+                    uploader = Users.find_one({"name": uploader_name}) if uploader_name else None
+                    uploader_id = str(uploader["_id"]) if uploader else None
+                    
+                    # Notify task owner only if they didn't upload the file themselves
+                    if uploader_id != userid:
+                        create_notification(
+                            userid=userid,
+                            title="File Uploaded",
+                            message=f"{uploader_name} uploaded a file '{filename}' to your task '{task_title}'.",
+                            notification_type="task",
+                            priority="medium",
+                            action_url=get_role_based_action_url(userid, "task"),
+                            related_id=taskid,
+                            metadata={
+                                "task_title": task_title,
+                                "action": "File Uploaded",
+                                "filename": filename,
+                                "uploaded_by": uploaded_by
+                            }
+                        )
+                    
+                    # Also notify the appropriate authority based on hierarchy if the user uploaded to their own task
+                    if uploader_id == userid:  # User uploaded file to their own task
+                        # Get uploader role to determine notification hierarchy
+                        uploader_role = get_user_role(uploader_id)
+                        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+                        
+                        if uploader_role == "manager":
+                            # Manager uploaded file → Notify HR
+                            hr_users = get_hr_users()
+                            
+                            for hr_user in hr_users:
+                                hr_id = str(hr_user["_id"])
+                                hr_name = hr_user.get("name", "HR")
+                                
+                                notification_id = create_notification(
+                                    userid=hr_id,
+                                    title="Manager File Uploaded",
+                                    message=f"Manager {uploader_name} uploaded a file '{filename}' to the task '{task_title}'. Please review if needed.",
+                                    notification_type="task",
+                                    priority="medium",
+                                    action_url=get_role_based_action_url(hr_id, "hr_task"),
+                                    related_id=taskid,
+                                    metadata={
+                                        "task_title": task_title,
+                                        "action": "File Uploaded",
+                                        "filename": filename,
+                                        "uploaded_by": uploaded_by,
+                                        "manager_name": uploader_name,
+                                        "manager_id": userid,
+                                        "notification_hierarchy": "manager_to_hr"
+                                    }
+                                )
+                                
+                                # Send real-time WebSocket notification to HR
+                                try:
+                                    from websocket_manager import notification_manager
+                                    import asyncio
+                                    
+                                    # Create async task for WebSocket notification
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        asyncio.create_task(notification_manager.send_personal_notification(hr_id, {
+                                            "_id": notification_id,
+                                            "title": "Manager File Uploaded",
+                                            "message": f"Manager {uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    else:
+                                        loop.run_until_complete(notification_manager.send_personal_notification(hr_id, {
+                                            "_id": notification_id,
+                                            "title": "Manager File Uploaded",
+                                            "message": f"Manager {uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    
+                                    print(f"✅ HR {hr_name} notified about Manager {uploader_name}'s file upload: {filename}")
+                                except Exception as ws_error:
+                                    print(f"Error sending WebSocket notification to HR: {ws_error}")
+                        
+                        else:
+                            # Employee uploaded file → Notify Manager
+                            # Find the manager who should be notified
+                            manager_to_notify = None
+                            assigned_by = updated_task.get("assigned_by")
+                            tl = updated_task.get("TL")
+                            
+                            # Determine the manager to notify using same logic as task completion
+                            if assigned_by and assigned_by != "self" and assigned_by != userid:
+                                manager_to_notify = assigned_by
+                            elif tl and tl != userid:
+                                manager_to_notify = tl
+                            elif user:
+                                user_tl = user.get("TL")
+                                user_manager = user.get("manager")
+                                if user_tl and user_tl != userid:
+                                    manager_to_notify = user_tl
+                                elif user_manager and user_manager != userid:
+                                    manager_to_notify = user_manager
+                            
+                            # Send notification to manager
+                            if manager_to_notify:
+                                manager = None
+                                if ObjectId.is_valid(manager_to_notify):
+                                    manager = Users.find_one({"_id": ObjectId(manager_to_notify)})
+                                else:
+                                    manager = Users.find_one({"$or": [
+                                        {"name": manager_to_notify},
+                                        {"userid": manager_to_notify}
+                                    ]})
+                                
+                                if manager:
+                                    manager_id = str(manager["_id"])
+                                    manager_name = manager.get("name", "Manager")
+                                    
+                                    notification_id = create_notification(
+                                        userid=manager_id,
+                                        title="Employee File Uploaded",
+                                        message=f"{uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                        notification_type="task",
+                                        priority="medium",
+                                        action_url=get_role_based_action_url(manager_id, "manager_task"),
+                                        related_id=taskid,
+                                        metadata={
+                                            "task_title": task_title,
+                                            "action": "File Uploaded",
+                                            "filename": filename,
+                                            "uploaded_by": uploaded_by,
+                                            "employee_name": uploader_name,
+                                            "employee_id": userid,
+                                            "notification_hierarchy": "employee_to_manager"
+                                        }
+                                    )
+                                    
+                                    # Send real-time WebSocket notification to manager
+                                    try:
+                                        from websocket_manager import notification_manager
+                                        import asyncio
+                                        
+                                        # Create async task for WebSocket notification
+                                        loop = asyncio.get_event_loop()
+                                        if loop.is_running():
+                                            asyncio.create_task(notification_manager.send_personal_notification(manager_id, {
+                                                "_id": notification_id,
+                                                "title": "Employee File Uploaded",
+                                                "message": f"{uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                                "type": "task",
+                                                "priority": "medium"
+                                            }))
+                                        else:
+                                            loop.run_until_complete(notification_manager.send_personal_notification(manager_id, {
+                                                "_id": notification_id,
+                                                "title": "Employee File Uploaded",
+                                                "message": f"{uploader_name} uploaded a file '{filename}' to the task '{task_title}'.",
+                                                "type": "task",
+                                                "priority": "medium"
+                                            }))
+                                        
+                                        print(f"✅ Manager {manager_name} notified about {uploader_name}'s file upload: {filename}")
+                                    except Exception as ws_error:
+                                        print(f"Error sending WebSocket notification to manager: {ws_error}")
+                                else:
+                                    print(f"⚠️ Manager not found: {manager_to_notify}")
+                            else:
+                                print(f"ℹ️ No manager found to notify for {uploader_name}'s file upload")
+                
+                if "subtasks" in update_fields and len(update_fields["subtasks"]) > len(current_task.get("subtasks", [])):
+                    # New subtask added
+                    new_subtask = update_fields["subtasks"][-1]  # Last subtask is the new one
+                    subtask_text = new_subtask.get("text", "")
+                    
+                    # Get user who made the request (the one editing the task)
+                    user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+                    user_name = user.get("name", "Team Member") if user else "Team Member"
+                    
+                    # Notify appropriate authority based on hierarchy when subtask is added
+                    # Get user role to determine notification hierarchy
+                    user_role = get_user_role(userid)
+                    
+                    if user_role == "manager":
+                        # Manager added subtask → Notify HR
+                        hr_users = get_hr_users()
+                        
+                        for hr_user in hr_users:
+                            hr_id = str(hr_user["_id"])
+                            hr_name = hr_user.get("name", "HR")
+                            
+                            notification_id = create_notification(
+                                userid=hr_id,
+                                title="Manager Subtask Added",
+                                message=f"Manager {user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                notification_type="task",
+                                priority="medium",
+                                action_url=get_role_based_action_url(hr_id, "hr_task"),
+                                related_id=taskid,
+                                metadata={
+                                    "task_title": task_title,
+                                    "action": "Subtask Added",
+                                    "subtask_text": subtask_text,
+                                    "manager_name": user_name,
+                                    "manager_id": userid,
+                                    "notification_hierarchy": "manager_to_hr"
+                                }
+                            )
+                            
+                            # Send real-time WebSocket notification to HR
+                            try:
+                                from websocket_manager import notification_manager
+                                import asyncio
+                                
+                                # Create async task for WebSocket notification
+                                loop = asyncio.get_event_loop()
+                                if loop.is_running():
+                                    asyncio.create_task(notification_manager.send_personal_notification(hr_id, {
+                                        "_id": notification_id,
+                                        "title": "Manager Subtask Added",
+                                        "message": f"Manager {user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                        "type": "task",
+                                        "priority": "medium"
+                                    }))
+                                else:
+                                    loop.run_until_complete(notification_manager.send_personal_notification(hr_id, {
+                                        "_id": notification_id,
+                                        "title": "Manager Subtask Added",
+                                        "message": f"Manager {user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                        "type": "task",
+                                        "priority": "medium"
+                                    }))
+                                
+                                print(f"✅ HR {hr_name} notified about Manager {user_name}'s subtask: {subtask_text}")
+                            except Exception as ws_error:
+                                print(f"Error sending WebSocket notification to HR: {ws_error}")
+                    
+                    else:
+                        # Employee added subtask → Notify Manager
+                        # Find the manager who should be notified
+                        manager_to_notify = None
+                        assigned_by = updated_task.get("assigned_by")
+                        tl = updated_task.get("TL")
+                        
+                        # Determine the manager to notify using same logic as task completion
+                        if assigned_by and assigned_by != "self" and assigned_by != userid:
+                            manager_to_notify = assigned_by
+                        elif tl and tl != userid:
+                            manager_to_notify = tl
+                        elif user:
+                            user_tl = user.get("TL")
+                            user_manager = user.get("manager")
+                            if user_tl and user_tl != userid:
+                                manager_to_notify = user_tl
+                            elif user_manager and user_manager != userid:
+                                manager_to_notify = user_manager
+                        
+                        # Send notification to manager
+                        if manager_to_notify:
+                            manager = None
+                            if ObjectId.is_valid(manager_to_notify):
+                                manager = Users.find_one({"_id": ObjectId(manager_to_notify)})
+                            else:
+                                manager = Users.find_one({"$or": [
+                                    {"name": manager_to_notify},
+                                    {"userid": manager_to_notify}
+                                ]})
+                            
+                            if manager:
+                                manager_id = str(manager["_id"])
+                                manager_name = manager.get("name", "Manager")
+                                
+                                notification_id = create_notification(
+                                    userid=manager_id,
+                                    title="Employee Subtask Added",
+                                    message=f"{user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                    notification_type="task",
+                                    priority="medium",
+                                    action_url=get_role_based_action_url(manager_id, "manager_task"),
+                                    related_id=taskid,
+                                    metadata={
+                                        "task_title": task_title,
+                                        "action": "Subtask Added",
+                                        "subtask_text": subtask_text,
+                                        "employee_name": user_name,
+                                        "employee_id": userid,
+                                        "notification_hierarchy": "employee_to_manager"
+                                    }
+                                )
+                                
+                                # Send real-time WebSocket notification to manager
+                                try:
+                                    from websocket_manager import notification_manager
+                                    import asyncio
+                                    
+                                    # Create async task for WebSocket notification
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        asyncio.create_task(notification_manager.send_personal_notification(manager_id, {
+                                            "_id": notification_id,
+                                            "title": "Employee Subtask Added",
+                                            "message": f"{user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    else:
+                                        loop.run_until_complete(notification_manager.send_personal_notification(manager_id, {
+                                            "_id": notification_id,
+                                            "title": "Employee Subtask Added",
+                                            "message": f"{user_name} added a new subtask '{subtask_text}' to the task '{task_title}'.",
+                                            "type": "task",
+                                            "priority": "medium"
+                                        }))
+                                    
+                                    print(f"✅ Manager {manager_name} notified about {user_name}'s subtask: {subtask_text}")
+                                except Exception as ws_error:
+                                    print(f"Error sending WebSocket notification to manager: {ws_error}")
+                            else:
+                                print(f"⚠️ Manager not found: {manager_to_notify}")
+                        else:
+                            print(f"ℹ️ No manager found to notify for {user_name}'s subtask")
+                
+                # General task update notification (only if there are meaningful changes)
+                if changes and not any(key in ["comments", "files", "subtasks"] for key in changes.keys()):
+                    # Check for status change
+                    if "status" in changes:
+                        old_status = current_task.get("status", "")
+                        new_status = changes["status"]
+                        
+                        # Don't send status change notification to employee when they complete their own task
+                        # The hierarchy-based completion notification will handle manager/HR notifications
+                        if not (new_status.lower() in ["completed", "done"]):
+                            create_notification(
+                                userid=userid,
+                                title="Task Status Updated",
+                                message=f"Your task '{task_title}' status has been changed from '{old_status}' to '{new_status}'.",
+                                notification_type="task",
+                                priority="high" if new_status.lower() in ["completed", "done"] else "medium",
+                                action_url=get_role_based_action_url(userid, "task"),
+                                related_id=taskid,
+                                metadata={
+                                    "task_title": task_title,
+                                    "action": "Status Changed",
+                                    "old_status": old_status,
+                                    "new_status": new_status
+                                }
+                            )
+                        
+                        # If task completed, notify appropriate authority based on hierarchy
+                        if new_status.lower() in ["completed", "done"] and updated_task:
+                            assigned_by = updated_task.get("assigned_by")
+                            tl = updated_task.get("TL")  # Also check TL field
+                            user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+                            assignee_name = user.get("name", "Employee") if user else "Employee"
+                            
+                            print(f"🔍 Task completion debug - assigned_by: {assigned_by}, TL: {tl}, userid: {userid}")
+                            
+                            # Determine the manager to notify
+                            manager_to_notify = None
+                            
+                            # Case 1: Task assigned by a specific manager (assigned_by is not "self")
+                            if assigned_by and assigned_by != "self" and assigned_by != userid:
+                                manager_to_notify = assigned_by
+                                print(f"📋 Task assigned by manager: {assigned_by}")
+                            
+                            # Case 2: Check if task has TL field (Team Leader)
+                            elif tl and tl != userid:
+                                manager_to_notify = tl
+                                print(f"👥 Task assigned by TL: {tl}")
+                            
+                            # Case 3: Find user's manager from their profile
+                            elif user:
+                                user_tl = user.get("TL")
+                                user_manager = user.get("manager") 
+                                if user_tl and user_tl != userid:
+                                    manager_to_notify = user_tl
+                                    print(f"👤 User's TL from profile: {user_tl}")
+                                elif user_manager and user_manager != userid:
+                                    manager_to_notify = user_manager
+                                    print(f"👤 User's manager from profile: {user_manager}")
+                            
+                            # Send notification to the identified manager
+                            if manager_to_notify:
+                                # Verify manager exists and get their details
+                                manager = None
+                                if ObjectId.is_valid(manager_to_notify):
+                                    manager = Users.find_one({"_id": ObjectId(manager_to_notify)})
+                                else:
+                                    # Try to find by name or other identifier
+                                    manager = Users.find_one({"$or": [
+                                        {"name": manager_to_notify},
+                                        {"userid": manager_to_notify},
+                                        {"_id": manager_to_notify}
+                                    ]})
+                                
+                                if manager:
+                                    manager_id = str(manager["_id"])
+                                    manager_name = manager.get("name", "Manager")
+                                    
+                                    print(f"✅ Notifying manager {manager_name} ({manager_id}) about {assignee_name}'s task completion")
+                                    
+                                    # Use enhanced hierarchy-based notification system
+                                    import asyncio
+                                    try:
+                                        completion_notifications = asyncio.run(create_task_completion_notification(
+                                            assignee_id=userid,
+                                            manager_id=manager_id,
+                                            task_title=task_title,
+                                            assignee_name=assignee_name,
+                                            task_id=taskid
+                                        ))
+                                        print(f"✅ Hierarchy completion notifications sent: {len(completion_notifications) if completion_notifications else 0}")
+                                    except Exception as e:
+                                        print(f"Error sending hierarchy completion notifications: {e}")
+                                        # Fallback to direct notification
+                                        create_notification(
+                                            userid=manager_id,
+                                            title="Task Completed",
+                                            message=f"{assignee_name} has completed the task '{task_title}'. Please review the work.",
+                                            notification_type="task_completed",
+                                            priority="high",
+                                            action_url=get_role_based_action_url(manager_id, "manager_task"),
+                                            related_id=taskid,
+                                            metadata={
+                                                "task_title": task_title,
+                                                "action": "Completed",
+                                                "assignee_name": assignee_name,
+                                                "assignee_id": userid
+                                            }
+                                        )
+                                else:
+                                    print(f"⚠️ Manager not found: {manager_to_notify}")
+                            else:
+                                # Handle case where no manager is found - check if user is a manager themselves
+                                user_role = get_user_role(userid)
+                                if user_role == "manager":
+                                    print(f"🏢 Manager {assignee_name} completed own task - notifying HR")
+                                    import asyncio
+                                    try:
+                                        completion_notifications = asyncio.run(create_task_completion_notification(
+                                            assignee_id=userid,
+                                            manager_id=None,  # No manager to notify, this is for HR
+                                            task_title=task_title,
+                                            assignee_name=assignee_name,
+                                            task_id=taskid
+                                        ))
+                                        print(f"✅ Manager self-task completion notifications sent to HR: {len(completion_notifications) if completion_notifications else 0}")
+                                    except Exception as e:
+                                        print(f"Error sending manager self-task completion notifications: {e}")
+                                else:
+                                    print(f"ℹ️ No manager found to notify for employee {assignee_name}'s task completion")
+                    else:
+                        # Other field changes
+                        change_details = []
+                        if "priority" in changes:
+                            change_details.append(f"priority to {changes['priority']}")
+                        if "due_date" in changes:
+                            change_details.append(f"due date to {changes['due_date']}")
+                        if "task" in changes:
+                            change_details.append("task description")
+                        
+                        if change_details:
+                            changes_text = ", ".join(change_details)
+                            create_notification(
+                                userid=userid,
+                                title="Task Updated",
+                                message=f"Your task '{task_title}' has been updated. Changes: {changes_text}",
+                                notification_type="task",
+                                priority="medium",
+                                action_url=get_role_based_action_url(userid, "task"),
+                                related_id=taskid,
+                                metadata={
+                                    "task_title": task_title,
+                                    "action": "Updated",
+                                    "changes": changes
+                                }
+                            )
+                
+            except Exception as e:
+                print(f"Error creating task update notifications: {e}")
+        
         return "Task updated successfully" if result.matched_count > 0 else "Task not found"
     else:
         return "No fields to update"
@@ -2339,12 +3102,16 @@ async def task_assign_to_multiple_users_with_notification(task_details, assigner
         
         for task in tasks:
             task_entry = {
-                "task": task,
+                "task": [task],
                 "status": "Not completed",
                 "date": datetime.strptime(item["date"], "%Y-%m-%d").strftime("%d-%m-%Y"),
                 "due_date": due_date,
                 "userid": userid,
-                "TL": item["TL"],
+                "assigned_by": item.get("assigned_by") or "HR",
+                "priority": item.get("priority", "Medium"),
+                "subtasks": item.get("subtasks", []),
+                "comments": item.get("comments", []), 
+                "files": item.get("files", []),
             }
             result = Tasks.insert_one(task_entry)
             task_id = str(result.inserted_id)
@@ -2612,6 +3379,14 @@ def get_role_based_action_url(userid, notification_type, base_path=None):
             'task_due_soon': {
                 'admin': '/admin/task',
                 'user': '/User/task'
+            },
+            'manager_task': {
+                'admin': '/admin/task',
+                'user': '/User/task'
+            },
+            'hr_task': {
+                'admin': '/admin/task',
+                'user': '/admin/task'  # HR users should see admin task view
             },
             
             # Leave-related notifications
@@ -3794,13 +4569,32 @@ async def create_task_updated_notification(userid, task_title, updater_name, cha
         return None
 
 async def create_task_manager_assigned_notification(userid, task_title, manager_name, task_id=None, due_date=None, priority="high"):
-    """Create specific notification when a manager assigns a task"""
+    """Create specific notification when someone assigns a task"""
     try:
         user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
         user_name = user.get("name", "User") if user else "User"
         
-        title = "Task Assigned by Manager"
-        message = f"Hi {user_name}, your manager {manager_name} has assigned you a new task: '{task_title}'"
+        # Get assigner's information to determine their role
+        assigner = None
+        if ObjectId.is_valid(manager_name):
+            assigner = Users.find_one({"_id": ObjectId(manager_name)})
+        else:
+            assigner = Users.find_one({"name": manager_name})
+        
+        assigner_name = assigner.get("name", manager_name) if assigner else manager_name
+        assigner_role = assigner.get("position", "Manager") if assigner else "Manager"
+        
+        # Create appropriate title based on assigner's role
+        if assigner_role.upper() == "HR":
+            title = "Task Assigned by HR"
+            message = f"Hi {user_name}, HR {assigner_name} has assigned you a new task: '{task_title}'"
+        elif assigner_role.upper() == "MANAGER":
+            title = "Task Assigned by Manager"
+            message = f"Hi {user_name}, your manager {assigner_name} has assigned you a new task: '{task_title}'"
+        else:
+            title = f"Task Assigned by {assigner_role}"
+            message = f"Hi {user_name}, {assigner_name} ({assigner_role}) has assigned you a new task: '{task_title}'"
+        
         if due_date:
             message += f". Due date: {due_date}"
         
@@ -3814,8 +4608,9 @@ async def create_task_manager_assigned_notification(userid, task_title, manager_
             related_id=task_id,
             metadata={
                 "task_title": task_title,
-                "action": "Assigned by Manager",
-                "manager_name": manager_name,
+                "action": f"Assigned by {assigner_role}",
+                "assigner_name": assigner_name,
+                "assigner_role": assigner_role,
                 "due_date": due_date
             }
         )
@@ -4861,6 +5656,8 @@ def assign_docs(doc_name: str, user_ids: list[str], assigned_by: str):
 
 
 # Save uploaded file
+from bson.binary import Binary
+
 def save_file_to_db(file_data: bytes, filename: str, content_type: str, userid: str, doc_name: str):
     try:
         # Insert file into files_collection
@@ -4905,7 +5702,7 @@ def get_assigned_docs():
 
 # Update file review status
 def update_file_status(file_id: str, status: str, remarks: str = None):
-    document_collection.update_one(
+    files_collection.update_one(
         {"_id": ObjectId(file_id)},
         {"$set": {"status": status, "remarks": remarks}}
     )
@@ -4914,3 +5711,656 @@ def update_file_status(file_id: str, status: str, remarks: str = None):
         {"assigned_docs.file_id": file_id},
         {"$set": {"assigned_docs.$.status": status}}
     )
+
+# ===============================
+# ENHANCED TASK NOTIFICATION SYSTEM
+# ===============================
+
+async def create_task_creation_notification(userid, task_title, task_id=None, priority="medium", created_by=None):
+    """Task creation → Creation confirmation"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Created Successfully"
+        message = f"Hi {user_name}, your task '{task_title}' has been created successfully."
+        if created_by and created_by != userid:
+            creator = Users.find_one({"_id": ObjectId(created_by)}) if ObjectId.is_valid(created_by) else None
+            creator_name = creator.get("name", "Manager") if creator else "Manager"
+            message = f"Hi {user_name}, a new task '{task_title}' has been created for you by {creator_name}."
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Created",
+                "created_by": created_by
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating task creation notification: {e}")
+        return None
+
+async def create_manager_assignment_notification(manager_id, task_title, assignee_name, task_id=None, priority="medium"):
+    """Manager assignment → Assignment notification with details"""
+    try:
+        manager = Users.find_one({"_id": ObjectId(manager_id)}) if ObjectId.is_valid(manager_id) else None
+        manager_name = manager.get("name", "Manager") if manager else "Manager"
+        
+        title = "Task Assignment Confirmed"
+        message = f"Hi {manager_name}, you have successfully assigned the task '{task_title}' to {assignee_name}."
+        
+        notification_id = create_notification(
+            userid=manager_id,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(manager_id, "manager_task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Assigned",
+                "assignee_name": assignee_name
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(manager_id, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating manager assignment notification: {e}")
+        return None
+
+async def create_task_update_notification(userid, task_title, changes, task_id=None, priority="medium", updated_by=None):
+    """Task updates → Update notifications with changes"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Updated"
+        change_details = []
+        
+        if "status" in changes:
+            change_details.append(f"status to {changes['status']}")
+        if "priority" in changes:
+            change_details.append(f"priority to {changes['priority']}")
+        if "due_date" in changes:
+            change_details.append(f"due date to {changes['due_date']}")
+        if "task" in changes:
+            change_details.append("task description")
+        
+        changes_text = ", ".join(change_details) if change_details else "task details"
+        message = f"Hi {user_name}, your task '{task_title}' has been updated. Changes: {changes_text}"
+        
+        if updated_by and updated_by != userid:
+            updater = Users.find_one({"_id": ObjectId(updated_by)}) if ObjectId.is_valid(updated_by) else None
+            updater_name = updater.get("name", "Manager") if updater else "Manager"
+            message += f" (Updated by {updater_name})"
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Updated",
+                "changes": changes,
+                "updated_by": updated_by
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating task update notification: {e}")
+        return None
+
+async def create_subtask_assignment_notification(userid, task_title, subtask_text, task_id=None, priority="medium", assigned_by=None):
+    """Subtask assignment → Individual subtask notifications"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Subtask Added"
+        message = f"Hi {user_name}, a new subtask '{subtask_text}' has been added to your task '{task_title}'."
+        
+        if assigned_by and assigned_by != userid:
+            assigner = Users.find_one({"_id": ObjectId(assigned_by)}) if ObjectId.is_valid(assigned_by) else None
+            assigner_name = assigner.get("name", "Manager") if assigner else "Manager"
+            message += f" (Added by {assigner_name})"
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Subtask Added",
+                "subtask_text": subtask_text,
+                "assigned_by": assigned_by
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating subtask assignment notification: {e}")
+        return None
+
+async def create_comment_notification(userid, task_title, comment_text, task_id=None, priority="medium", commented_by=None):
+    """Comments added → Real-time comment alerts"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        commenter = Users.find_one({"_id": ObjectId(commented_by)}) if ObjectId.is_valid(commented_by) else None
+        commenter_name = commenter.get("name", "Team Member") if commenter else "Team Member"
+        
+        title = "Task Comment Added"
+        message = f"Hi {user_name}, {commenter_name} has added a comment to your task '{task_title}': '{comment_text[:100]}{'...' if len(comment_text) > 100 else ''}'"
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Comment Added",
+                "comment_text": comment_text,
+                "commented_by": commented_by,
+                "commenter_name": commenter_name
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating comment notification: {e}")
+        return None
+
+async def create_file_upload_notification(userid, task_title, filename, task_id=None, priority="medium", uploaded_by=None):
+    """File uploads → File attachment notifications"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        uploader = Users.find_one({"_id": ObjectId(uploaded_by)}) if ObjectId.is_valid(uploaded_by) else None
+        uploader_name = uploader.get("name", "Team Member") if uploader else "Team Member"
+        
+        title = "File Uploaded"
+        message = f"Hi {user_name}, {uploader_name} has uploaded a file '{filename}' to your task '{task_title}'."
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "File Uploaded",
+                "filename": filename,
+                "uploaded_by": uploaded_by,
+                "uploader_name": uploader_name
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating file upload notification: {e}")
+        return None
+
+async def create_status_change_notification(userid, task_title, old_status, new_status, task_id=None, priority="medium", changed_by=None):
+    """Status changes → Progress tracking notifications"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Status Updated"
+        message = f"Hi {user_name}, your task '{task_title}' status has been changed from '{old_status}' to '{new_status}'."
+        
+        if changed_by and changed_by != userid:
+            changer = Users.find_one({"_id": ObjectId(changed_by)}) if ObjectId.is_valid(changed_by) else None
+            changer_name = changer.get("name", "Manager") if changer else "Manager"
+            message += f" (Changed by {changer_name})"
+        
+        # Set priority based on status
+        if new_status.lower() in ["completed", "done"]:
+            priority = "high"
+        elif new_status.lower() in ["in progress", "started"]:
+            priority = "medium"
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Status Changed",
+                "old_status": old_status,
+                "new_status": new_status,
+                "changed_by": changed_by
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating status change notification: {e}")
+        return None
+
+def get_hr_users():
+    """Get all HR users from the database"""
+    try:
+        hr_users = list(Users.find({
+            "$or": [
+                {"position": "HR"},
+                {"position": {"$regex": "HR", "$options": "i"}},
+                {"department": "HR"},
+                {"department": {"$regex": "HR", "$options": "i"}}
+            ]
+        }))
+        return hr_users
+    except Exception as e:
+        print(f"Error fetching HR users: {e}")
+        return []
+
+def get_user_role(user_id):
+    """Get user role/position to determine notification hierarchy"""
+    try:
+        user = Users.find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else None
+        if user:
+            return user.get("position", "").lower()
+        return None
+    except Exception as e:
+        print(f"Error getting user role: {e}")
+        return None
+
+async def create_task_completion_notification(assignee_id, manager_id, task_title, assignee_name, task_id=None, priority="high"):
+    """Enhanced Task completion → Hierarchy-based completion alerts
+    - Employee task completion → Notify Manager
+    - Manager task completion → Notify HR
+    """
+    try:
+        notifications_sent = []
+        
+        # Get assignee role to determine notification hierarchy
+        assignee_role = get_user_role(assignee_id)
+        
+        if assignee_role == "manager":
+            # Manager completed task → Notify HR
+            hr_users = get_hr_users()
+            
+            for hr_user in hr_users:
+                hr_id = str(hr_user["_id"])
+                hr_name = hr_user.get("name", "HR")
+                
+                title = "Manager Task Completed"
+                message = f"Hi {hr_name}, Manager {assignee_name} has completed the task '{task_title}'. Please review the work."
+                
+                notification_id = create_notification(
+                    userid=hr_id,
+                    title=title,
+                    message=message,
+                    notification_type="task",
+                    priority=priority,
+                    action_url=get_role_based_action_url(hr_id, "hr_task"),
+                    related_id=task_id,
+                    metadata={
+                        "task_title": task_title,
+                        "action": "Completed",
+                        "assignee_name": assignee_name,
+                        "assignee_role": "Manager",
+                        "notification_hierarchy": "manager_to_hr"
+                    }
+                )
+                
+                # Send WebSocket notification
+                from websocket_manager import notification_manager
+                await notification_manager.send_personal_notification(hr_id, {
+                    "_id": notification_id,
+                    "title": title,
+                    "message": message,
+                    "type": "task",
+                    "priority": priority
+                })
+                
+                notifications_sent.append(notification_id)
+                print(f"✅ HR {hr_name} notified about Manager {assignee_name}'s task completion: {task_title}")
+        
+        else:
+            # Employee completed task → Notify Manager (existing logic)
+            if manager_id:
+                manager = Users.find_one({"_id": ObjectId(manager_id)}) if ObjectId.is_valid(manager_id) else None
+                manager_name = manager.get("name", "Manager") if manager else "Manager"
+                
+                title = "Task Completed"
+                message = f"Hi {manager_name}, {assignee_name} has completed the task '{task_title}'. Please review the work."
+                
+                notification_id = create_notification(
+                    userid=manager_id,
+                    title=title,
+                    message=message,
+                    notification_type="task",
+                    priority=priority,
+                    action_url=get_role_based_action_url(manager_id, "manager_task"),
+                    related_id=task_id,
+                    metadata={
+                        "task_title": task_title,
+                        "action": "Completed",
+                        "assignee_name": assignee_name,
+                        "assignee_role": assignee_role or "Employee",
+                        "notification_hierarchy": "employee_to_manager"
+                    }
+                )
+                
+                # Send WebSocket notification
+                from websocket_manager import notification_manager
+                await notification_manager.send_personal_notification(manager_id, {
+                    "_id": notification_id,
+                    "title": title,
+                    "message": message,
+                    "type": "task",
+                    "priority": priority
+                })
+                
+                notifications_sent.append(notification_id)
+                print(f"✅ Manager {manager_name} notified about {assignee_name}'s task completion: {task_title}")
+        
+        return notifications_sent
+    except Exception as e:
+        print(f"Error creating task completion notification: {e}")
+        return []
+
+async def create_deadline_approach_notification(userid, task_title, days_remaining, task_id=None, priority="high"):
+    """Deadline approach → Smart reminder system"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Deadline Approaching"
+        if days_remaining == 0:
+            message = f"Hi {user_name}, your task '{task_title}' is due today! Please complete it as soon as possible."
+            priority = "critical"
+        elif days_remaining == 1:
+            message = f"Hi {user_name}, your task '{task_title}' is due tomorrow. Please ensure it's completed on time."
+            priority = "high"
+        else:
+            message = f"Hi {user_name}, your task '{task_title}' is due in {days_remaining} days. Please plan accordingly."
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Deadline Approaching",
+                "days_remaining": days_remaining
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating deadline approach notification: {e}")
+        return None
+
+async def create_overdue_task_notification(userid, task_title, days_overdue, task_id=None, priority="critical"):
+    """Overdue tasks → Automatic overdue notifications"""
+    try:
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        title = "Task Overdue"
+        if days_overdue == 1:
+            message = f"Hi {user_name}, your task '{task_title}' is 1 day overdue. Please complete it immediately."
+        else:
+            message = f"Hi {user_name}, your task '{task_title}' is {days_overdue} days overdue. This requires immediate attention."
+        
+        notification_id = create_notification(
+            userid=userid,
+            title=title,
+            message=message,
+            notification_type="task",
+            priority=priority,
+            action_url=get_role_based_action_url(userid, "task"),
+            related_id=task_id,
+            metadata={
+                "task_title": task_title,
+                "action": "Overdue",
+                "days_overdue": days_overdue
+            }
+        )
+        
+        # Send WebSocket notification
+        from websocket_manager import notification_manager
+        await notification_manager.send_personal_notification(userid, {
+            "_id": notification_id,
+            "title": title,
+            "message": message,
+            "type": "task",
+            "priority": priority
+        })
+        
+        return notification_id
+    except Exception as e:
+        print(f"Error creating overdue task notification: {e}")
+        return None
+
+# Helper function to notify all relevant parties about task events
+async def notify_task_stakeholders(task_data, action, **kwargs):
+    """Notify all relevant stakeholders about task events"""
+    try:
+        task_id = task_data.get("_id")
+        task_title = task_data.get("task", "Unknown Task")
+        userid = task_data.get("userid")
+        assigned_by = task_data.get("assigned_by")
+        
+        # Get user details
+        user = Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "User") if user else "User"
+        
+        # Get manager/assigner details
+        manager = None
+        if assigned_by and assigned_by != "self" and assigned_by != "HR":
+            manager = Users.find_one({"_id": ObjectId(assigned_by)}) if ObjectId.is_valid(assigned_by) else None
+        
+        notifications_sent = []
+        
+        if action == "created":
+            # Notify the assignee
+            notification_id = await create_task_creation_notification(
+                userid=userid,
+                task_title=task_title,
+                task_id=str(task_id),
+                created_by=kwargs.get("created_by")
+            )
+            notifications_sent.append(notification_id)
+            
+            # Notify manager if task was assigned by someone else
+            if manager and kwargs.get("created_by") != userid:
+                manager_notification_id = await create_manager_assignment_notification(
+                    manager_id=assigned_by,
+                    task_title=task_title,
+                    assignee_name=user_name,
+                    task_id=str(task_id)
+                )
+                notifications_sent.append(manager_notification_id)
+        
+        elif action == "updated":
+            # Notify the assignee
+            notification_id = await create_task_update_notification(
+                userid=userid,
+                task_title=task_title,
+                changes=kwargs.get("changes", {}),
+                task_id=str(task_id),
+                updated_by=kwargs.get("updated_by")
+            )
+            notifications_sent.append(notification_id)
+            
+            # If status changed to completed, notify appropriate authority based on hierarchy
+            if kwargs.get("changes", {}).get("status") in ["Completed", "Done", "completed", "done"]:
+                completion_notification_ids = await create_task_completion_notification(
+                    assignee_id=userid,
+                    manager_id=assigned_by if manager else None,
+                    task_title=task_title,
+                    assignee_name=user_name,
+                    task_id=str(task_id)
+                )
+                if completion_notification_ids:
+                    notifications_sent.extend(completion_notification_ids)
+        
+        elif action == "comment_added":
+            # Notify task owner if comment is by someone else
+            if kwargs.get("commented_by") != userid:
+                notification_id = await create_comment_notification(
+                    userid=userid,
+                    task_title=task_title,
+                    comment_text=kwargs.get("comment_text", ""),
+                    task_id=str(task_id),
+                    commented_by=kwargs.get("commented_by")
+                )
+                notifications_sent.append(notification_id)
+            
+            # Notify manager if they exist and didn't make the comment
+            if manager and kwargs.get("commented_by") != assigned_by:
+                notification_id = await create_comment_notification(
+                    userid=assigned_by,
+                    task_title=task_title,
+                    comment_text=kwargs.get("comment_text", ""),
+                    task_id=str(task_id),
+                    commented_by=kwargs.get("commented_by")
+                )
+                notifications_sent.append(notification_id)
+        
+        elif action == "file_uploaded":
+            # Notify task owner if file uploaded by someone else
+            if kwargs.get("uploaded_by") != userid:
+                notification_id = await create_file_upload_notification(
+                    userid=userid,
+                    task_title=task_title,
+                    filename=kwargs.get("filename", "file"),
+                    task_id=str(task_id),
+                    uploaded_by=kwargs.get("uploaded_by")
+                )
+                notifications_sent.append(notification_id)
+            
+            # Notify manager if they exist and didn't upload the file
+            if manager and kwargs.get("uploaded_by") != assigned_by:
+                notification_id = await create_file_upload_notification(
+                    userid=assigned_by,
+                    task_title=task_title,
+                    filename=kwargs.get("filename", "file"),
+                    task_id=str(task_id),
+                    uploaded_by=kwargs.get("uploaded_by")
+                )
+                notifications_sent.append(notification_id)
+        
+        return notifications_sent
+    except Exception as e:
+        print(f"Error notifying task stakeholders: {e}")
+        return []

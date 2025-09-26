@@ -64,40 +64,29 @@ async def check_and_notify_overdue_tasks():
                 if days_overdue > 0:
                     overdue_count += 1
                     
+                    # Use enhanced overdue task notification
+                    from Mongo import create_overdue_task_notification
+                    
                     # Notify task owner/assignee
                     if userid:
-                        await create_notification_with_websocket(
+                        await create_overdue_task_notification(
                             userid=userid,
-                            title=f"⚠️ Task Overdue: {task_title}",
-                            message=f"Task '{task_title}' is {days_overdue} day(s) overdue. Please complete it as soon as possible.",
-                            notification_type="task_overdue",
-                            priority="high",
-                            action_url=f"/User/task",
-                            related_id=task_id,
-                            metadata={
-                                "task_id": task_id,
-                                "days_overdue": days_overdue,
-                                "due_date": due_date_str
-                            }
+                            task_title=task_title,
+                            days_overdue=days_overdue,
+                            task_id=task_id,
+                            priority="critical"
                         )
                         notifications_sent += 1
                     
                     # Notify assigned users
                     for assigned_user_id in assigned_to:
                         if assigned_user_id != userid:
-                            await create_notification_with_websocket(
+                            await create_overdue_task_notification(
                                 userid=assigned_user_id,
-                                title=f"⚠️ Assigned Task Overdue: {task_title}",
-                                message=f"Task '{task_title}' assigned to you is {days_overdue} day(s) overdue.",
-                                notification_type="task_overdue",
-                                priority="high",
-                                action_url=f"/User/viewtask",
-                                related_id=task_id,
-                                metadata={
-                                    "task_id": task_id,
-                                    "days_overdue": days_overdue,
-                                    "due_date": due_date_str
-                                }
+                                task_title=task_title,
+                                days_overdue=days_overdue,
+                                task_id=task_id,
+                                priority="critical"
                             )
                             notifications_sent += 1
                     
@@ -110,9 +99,9 @@ async def check_and_notify_overdue_tasks():
                         await create_notification_with_websocket(
                             userid=manager_id,
                             title=f"🔔 Employee Task Overdue: {employee_name}",
-                            message=f"{employee_name}'s task '{task_title}' is {days_overdue} day(s) overdue.",
+                            message=f"{employee_name}'s task '{task_title}' is {days_overdue} day(s) overdue. Immediate attention required.",
                             notification_type="employee_task_overdue",
-                            priority="high",
+                            priority="critical",
                             action_url=f"/admin/task",
                             related_id=task_id,
                             metadata={
@@ -164,54 +153,34 @@ async def check_upcoming_deadlines():
                 if not due_date_str:
                     continue
                 
-                # Determine urgency
-                if due_date_str == today:
-                    urgency = "today"
-                    priority = "high"
-                    message = f"Task '{task_title}' is due TODAY. Please complete it before end of day."
-                elif due_date_str == tomorrow:
-                    urgency = "tomorrow"
-                    priority = "medium"
-                    message = f"Task '{task_title}' is due TOMORROW ({format_date_readable(due_date_str)}). Please prepare to complete it."
-                else:
-                    urgency = "soon"
-                    priority = "medium"
-                    message = f"Task '{task_title}' is due in 3 days ({format_date_readable(due_date_str)}). Please start working on it."
+                # Determine urgency and calculate days remaining
+                due_date_obj = datetime.strptime(due_date_str, "%d-%m-%Y")
+                current_date_obj = datetime.strptime(current_time.strftime("%d-%m-%Y"), "%d-%m-%Y")
+                days_remaining = (due_date_obj - current_date_obj).days
+                
+                # Use enhanced deadline approach notification
+                from Mongo import create_deadline_approach_notification
                 
                 # Notify task owner
                 if userid:
-                    await create_notification_with_websocket(
+                    await create_deadline_approach_notification(
                         userid=userid,
-                        title=f"⏰ Task Due {urgency.capitalize()}: {task_title}",
-                        message=message,
-                        notification_type="task_due_soon",
-                        priority=priority,
-                        action_url=f"/User/task",
-                        related_id=task_id,
-                        metadata={
-                            "task_id": task_id,
-                            "due_date": due_date_str,
-                            "urgency": urgency
-                        }
+                        task_title=task_title,
+                        days_remaining=days_remaining,
+                        task_id=task_id,
+                        priority="high" if days_remaining == 0 else "medium"
                     )
                     notifications_sent += 1
                 
                 # Notify assigned users
                 for assigned_user_id in assigned_to:
                     if assigned_user_id != userid:
-                        await create_notification_with_websocket(
+                        await create_deadline_approach_notification(
                             userid=assigned_user_id,
-                            title=f"⏰ Assigned Task Due {urgency.capitalize()}: {task_title}",
-                            message=f"Task '{task_title}' assigned to you is due {urgency}.",
-                            notification_type="task_due_soon",
-                            priority=priority,
-                            action_url=f"/User/viewtask",
-                            related_id=task_id,
-                            metadata={
-                                "task_id": task_id,
-                                "due_date": due_date_str,
-                                "urgency": urgency
-                            }
+                            task_title=task_title,
+                            days_remaining=days_remaining,
+                            task_id=task_id,
+                            priority="high" if days_remaining == 0 else "medium"
                         )
                         notifications_sent += 1
                         
@@ -251,12 +220,10 @@ async def check_missed_attendance():
                 attendance_today = Clock.find_one({
                     "userid": userid,
                     "date": current_date,
-                    "$or": [
-                        {"clock_in_time": {"$exists": True, "$ne": ""}},
-                        {"time": {"$exists": True, "$ne": ""}}
-                    ]
+                    "clockin": {"$exists": True, "$ne": ""}
                 })
                 
+                # Only send notification if user hasn't clocked in
                 if not attendance_today:
                     # Send missed clock-in notification
                     await create_notification_with_websocket(
@@ -282,6 +249,67 @@ async def check_missed_attendance():
         
     except Exception as e:
         print(f"❌ Error in check_missed_attendance: {e}")
+        return {"error": str(e)}
+
+async def check_missed_clock_out():
+    """Check for users who clocked in but forgot to clock out"""
+    try:
+        from datetime import datetime, time
+        import pytz
+        
+        current_time = datetime.now(pytz.timezone("Asia/Kolkata"))
+        current_date = current_time.strftime("%Y-%m-%d")
+        notifications_sent = 0
+        
+        # Only check after office hours (after 7 PM)
+        office_end_time = time(19, 0)  # 7:00 PM
+        if current_time.time() < office_end_time:
+            print("⏰ Not yet time to check for missed clock-out")
+            return {"message": "Too early for clock-out reminders"}
+        
+        print("🔍 Checking for missed clock-out...")
+        
+        # Find all users who clocked in today but haven't clocked out
+        users_without_clockout = list(Clock.find({
+            "date": current_date,
+            "clockin": {"$exists": True, "$ne": ""},
+            "clockout": {"$exists": False}
+        }))
+        
+        for record in users_without_clockout:
+            try:
+                userid = record.get("userid")
+                user_name = record.get("name", "User")
+                clockin_time = record.get("clockin", "")
+                
+                if not userid:
+                    continue
+                
+                # Send missed clock-out notification
+                await create_notification_with_websocket(
+                    userid=userid,
+                    title="⏰ Missed Clock-Out Reminder",
+                    message=f"Hi {user_name}, you clocked in at {clockin_time} but haven't clocked out yet. Please remember to clock out.",
+                    notification_type="attendance",
+                    priority="medium",
+                    action_url="/User/Clockin_int",
+                    metadata={
+                        "date": current_date,
+                        "type": "missed_clock_out",
+                        "clockin_time": clockin_time
+                    }
+                )
+                notifications_sent += 1
+                
+            except Exception as e:
+                print(f"❌ Error checking clock-out for user {record.get('userid', 'unknown')}: {e}")
+                continue
+        
+        print(f"✅ Missed clock-out check completed: {notifications_sent} notifications sent")
+        return {"notifications_sent": notifications_sent}
+        
+    except Exception as e:
+        print(f"❌ Error in check_missed_clock_out: {e}")
         return {"error": str(e)}
 
 async def check_pending_approvals():
@@ -413,17 +441,20 @@ async def run_all_automated_checks():
         overdue_result = await check_and_notify_overdue_tasks()
         upcoming_result = await check_upcoming_deadlines()
         attendance_result = await check_missed_attendance()
+        clockout_result = await check_missed_clock_out()
         approval_result = await check_pending_approvals()
         
         results["overdue_tasks"] = overdue_result
         results["upcoming_deadlines"] = upcoming_result
         results["missed_attendance"] = attendance_result
+        results["missed_clock_out"] = clockout_result
         results["pending_approvals"] = approval_result
         
         total_notifications = (
             overdue_result.get("notifications_sent", 0) +
             upcoming_result.get("notifications_sent", 0) +
             attendance_result.get("notifications_sent", 0) +
+            clockout_result.get("notifications_sent", 0) +
             approval_result.get("notifications_sent", 0)
         )
         

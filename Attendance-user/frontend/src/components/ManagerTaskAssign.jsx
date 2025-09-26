@@ -23,8 +23,8 @@ const Note = ({ empdata, handleDelete, handleEdit }) => {
       empdata.bg ? empdata.bg : 'bg-green-300'
     } p-6 pt-12 w-[320px] min-h-[250px] relative flex flex-col 
       rounded-lg shadow-xl border-l-[10px] border-grey-500 
-      transition-all transform hover:rotate-2 hover:-translate-y-1 
-      hover:shadow-white-400 hover:shadow-md animate-fade-in`}
+      transition-all duration-300 transform hover:rotate-2 hover:-translate-y-2 hover:scale-105
+      hover:shadow-2xl hover:shadow-black/20 hover:z-10 animate-fade-in`}
   >
     {/* Sticky Tape Effect */}
     <div className="absolute top-0 left-1/2 -translate-x-1/2 w-24 h-6 bg-gray-400 opacity-30 rounded-b-lg"></div>
@@ -463,9 +463,6 @@ const handleonSubmit = async () => {
         taskArr.push(taskdetails);
       }
 
-      const assignMessage ="Task Assigned to Manager";
-      toast.success(assignMessage);
-
       console.log("taskArr:", taskArr);
 
       const response = await axios({
@@ -478,6 +475,12 @@ const handleonSubmit = async () => {
       });
 
       if (response.status === 200) {
+        const taskCount = taskArr.reduce((total, item) => total + (item.Tasks?.length || 0), 0);
+        const userCount = taskArr.length;
+        
+        const successMessage = `Successfully assigned ${taskCount} task(s) to ${userCount} employee(s). Notifications sent!`;
+        toast.success(successMessage);
+        
         setModelData({
           task: [""],
           userid: "",
@@ -942,7 +945,7 @@ useEffect(() => {
         </div>
       </header>
 
-      <div className="notes border-t-2 border-gray-200 mt-5 pt-5 container mx-auto grid md:grid-cols-4 gap-10 ">
+      <div className="notes border-t-2 border-gray-200 mt-5 pt-5 container mx-auto grid md:grid-cols-4 gap-10 justify-items-center">
         {filteredData && filteredData.length > 0 ? (
           filteredData.map((item, i) => {
             return (

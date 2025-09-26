@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse
 import uuid, os
 from datetime import datetime
 from bson import ObjectId
+import asyncio
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
@@ -114,6 +115,7 @@ from Mongo import (
     edit_an_employee,
     get_managers,
     task_assign_to_multiple_users,
+    task_assign_to_multiple_users_with_notification,
     get_team_members,
     manager_task_assignment,
     assigned_task,
@@ -176,13 +178,6 @@ import atexit
 
 app = FastAPI()
 origins = [
-    
-   "http://localhost:5176",
-    "http://localhost:5173",
-    "http://127.0.0.1:5176",
-    "http://127.0.0.1:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
     "*"    # Allow all origins for development
 ]
 
@@ -1284,6 +1279,7 @@ async def fetch_remote_work_requests():
     return {"remote_work_requests": remote_work_requests}
 
 async def fetch_remote_work_requests(TL: str = Query(..., alias="TL")):
+    remote_work_requests = get_remote_work_requests(TL)
     return {"remote_work_requests": remote_work_requests}
 
 
@@ -1641,6 +1637,43 @@ async def get_Permission_history(userid: str = Path(..., title="The ID of the us
 
 # ============== LEAVE DETAILS ENDPOINTS ==============
 
+# @app.get("/leave_details/user/{userid}")
+# async def get_user_leave_details(
+#     userid: str,
+#     status_filter: str = Query("All", alias="statusFilter"),
+#     leave_type_filter: str = Query("All", alias="leaveTypeFilter")
+# ):
+#     """Get all leave details for a specific user"""
+#     try:
+#         match_conditions = {"userid": userid}
+        
+#         if status_filter and status_filter != "All":
+#             if status_filter == "Pending":
+#                 match_conditions["status"] = {"$exists": False}
+#             else:
+#                 match_conditions["status"] = status_filter
+        
+#         if leave_type_filter and leave_type_filter != "All":
+#             match_conditions["leaveType"] = leave_type_filter
+        
+#         leave_details = list(Leave.find(match_conditions))
+        
+#         # Convert ObjectId and format dates
+#         for leave in leave_details:
+#             leave["_id"] = str(leave["_id"])
+#             if "selectedDate" in leave and leave["selectedDate"]:
+#                 leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
+#             if "requestDate" in leave and leave["requestDate"]:
+#                 leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
+#             if "ToDate" in leave and leave["ToDate"]:
+#                 leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
+        
+#         return {"leave_details": leave_details}
+        
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/leave_details/user/{userid}")
 async def get_user_leave_details(
     userid: str,
@@ -1649,32 +1682,38 @@ async def get_user_leave_details(
 ):
     """Get all leave details for a specific user"""
     try:
+        # Base query
         match_conditions = {"userid": userid}
-        
+
+        # Status filter
         if status_filter and status_filter != "All":
             if status_filter == "Pending":
-                match_conditions["status"] = {"$exists": False}
+                # Match leaves with no status or status == "Pending"
+                match_conditions["$or"] = [
+                    {"status": {"$exists": False}},
+                    {"status": "Pending"}
+                ]
             else:
                 match_conditions["status"] = status_filter
-        
+
+        # Leave type filter
         if leave_type_filter and leave_type_filter != "All":
             match_conditions["leaveType"] = leave_type_filter
-        
+
+        # Fetch data from MongoDB
         leave_details = list(Leave.find(match_conditions))
-        
-        # Convert ObjectId and format dates
+
+        # Convert ObjectId to string & format dates safely
         for leave in leave_details:
             leave["_id"] = str(leave["_id"])
-            if "selectedDate" in leave and leave["selectedDate"]:
-                leave["selectedDate"] = leave["selectedDate"].strftime("%d-%m-%Y")
-            if "requestDate" in leave and leave["requestDate"]:
-                leave["requestDate"] = leave["requestDate"].strftime("%d-%m-%Y")
-            if "ToDate" in leave and leave["ToDate"]:
-                leave["ToDate"] = leave["ToDate"].strftime("%d-%m-%Y")
-        
+            for date_field in ["selectedDate", "requestDate", "ToDate"]:
+                if leave.get(date_field) and hasattr(leave[date_field], "strftime"):
+                    leave[date_field] = leave[date_field].strftime("%d-%m-%Y")
+
         return {"leave_details": leave_details}
-        
+
     except Exception as e:
+        # Return proper 500 error
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2580,10 +2619,57 @@ async def upload_task_file(
             os.remove(file_path)
             raise HTTPException(status_code=404, detail="Task not found")
 
-        return {"message": "File uploaded successfully", "file": file_meta}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Send file upload notifications
+        try:
+            task = Mongo.Tasks.find_one({"_id": ObjectId(taskid)})
+            if task:
+                task_title = task.get("task", "Task")
+                task_userid = task.get("userid")
+                
+                # Get uploader name
+                uploader = Mongo.Users.find_one({"_id": ObjectId(uploaded_by)}) if ObjectId.is_valid(uploaded_by) else None
+                uploader_name = uploader.get("name", "Team Member") if uploader else "Team Member"
+                
+                # Notify task owner if file uploaded by someone else
+                if task_userid and uploaded_by != task_userid:
+                    Mongo.create_notification(
+                        userid=task_userid,
+                        title="File Uploaded",
+                        message=f"{uploader_name} uploaded a file '{file.filename}' to your task '{task_title}'.",
+                        notification_type="task",
+                        priority="medium",
+                        action_url=Mongo.get_role_based_action_url(task_userid, "task"),
+                        related_id=taskid,
+                        metadata={
+                            "task_title": task_title,
+                            "action": "File Uploaded",
+                            "filename": file.filename,
+                            "uploaded_by": uploaded_by
+                        }
+                    )
+                
+                # Notify manager if they exist and didn't upload the file
+                assigned_by = task.get("assigned_by")
+                if assigned_by and assigned_by != "self" and assigned_by != uploaded_by and assigned_by != task_userid:
+                    Mongo.create_notification(
+                        userid=assigned_by,
+                        title="File Uploaded to Assigned Task",
+                        message=f"{uploader_name} uploaded a file '{file.filename}' to the task '{task_title}'.",
+                        notification_type="task",
+                        priority="medium",
+                        action_url=Mongo.get_role_based_action_url(assigned_by, "manager_task"),
+                        related_id=taskid,
+                        metadata={
+                            "task_title": task_title,
+                            "action": "File Uploaded",
+                            "filename": file.filename,
+                            "uploaded_by": uploaded_by
+                        }
+                    )
+        except Exception as e:
+            print(f"Error sending file upload notification: {e}")
 
+        return {"message": "File uploaded successfully", "file": file_meta}
         
     except Exception as e:
         print(f"File upload error: {e}")  # DEBUG
@@ -2708,16 +2794,28 @@ def get_members(TL: str = Query(..., alias="TL")):
     return result
 
 @app.post("/task_assign_to_multiple_members") 
-def task_assign(item: Taskassign):
+async def task_assign(item: Taskassign):
     print(item.Task_details)
-    # result = task_assign_to_multiple_users(item.Task_details)
+    # Add assigned_by field and get assigner name
+    assigner_name = None
     for t in item.Task_details:
         if "assigned_by" not in t:
             t["assigned_by"] = t.get("TL", "Manager")
+        # Get assigner name from first item
+        if not assigner_name and t.get("TL"):
+            assigner_user = Users.find_one({"_id": ObjectId(t["TL"])}) if ObjectId.is_valid(t["TL"]) else None
+            if not assigner_user:
+                assigner_user = Users.find_one({"name": t["TL"]})
+            assigner_name = assigner_user.get("name", t["TL"]) if assigner_user else t["TL"]
 
-    result = task_assign_to_multiple_users(item.Task_details)
+    # Use enhanced version with notifications
+    result = await task_assign_to_multiple_users_with_notification(
+        item.Task_details, 
+        assigner_name=assigner_name,
+        single_notification_per_user=True
+    )
 
-    return {"inserted_ids": result}
+    return {"inserted_ids": result, "message": "Tasks assigned successfully with notifications"}
 
 @app.get("/get_assigned_task")
 def get_assigned_tasks(TL: str = Query(..., alias="TL"), userid: str | None = Query(None, alias = "userid")):
@@ -3708,7 +3806,8 @@ async def get_role_based_attendance_dashboard(userid: str, year: int = Query(Non
         if position == "admin":
             return await get_admin_attendance_overview(year)
         elif position == "hr":
-            return await get_hr_attendance_analytics(year)
+            # Placeholder: HR analytics not implemented, return empty or basic stats
+            return {"message": "HR attendance analytics not implemented", "year": year}
         elif position == "manager":
             return await get_manager_attendance_overview(userid, year)
         elif position == "tl" or position == "team lead":
@@ -3934,7 +4033,7 @@ async def upload_chat_file(
 
 @app.get("/get_files/{chatId}")
 async def get_files(chatId: str):
-    docs = list(files_col.find({"chatId": chatId}))
+    docs = list(files_collection.find({"chatId": chatId}))
     return [{"name": d["name"], "type": d["type"], "data": d["data"]} for d in docs]
 
 # ------------------ Upload Document ------------------
@@ -4061,6 +4160,8 @@ async def delete_assigned_doc(data: dict):
 
     return {"message": f"Document '{docName}' deleted successfully"}
 
+from fastapi import Response
+
 @app.get("/view_file/{file_id}")
 async def view_file(file_id: str):
     file_doc = files_collection.find_one({"_id": ObjectId(file_id)})
@@ -4101,11 +4202,11 @@ async def get_user_groups(user_id: str):
 
 @app.get("/group_members/{group_id}")
 async def get_group_members(group_id: str):
-    group = db.groups.find_one({"_id": ObjectId(group_id)})
+    group = groups_collection.find_one({"_id": group_id})
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
     
-    members = list(db.users.find({"_id": {"$in": group.get("members", [])}}, {"name": 1, "depart": 1}))
+    members = list(Users.find({"_id": {"$in": group.get("members", [])}}, {"name": 1, "depart": 1}))
     # Convert ObjectId to string for frontend
     for m in members:
         m["_id"] = str(m["_id"])
@@ -4176,3 +4277,448 @@ async def update_group(group_id: str, group: GroupUpdate):
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Group not found")
     return {"status": "success", "group_id": group_id, "name": group.name}
+
+# ===============================
+# ENHANCED TASK NOTIFICATION ENDPOINTS
+# ===============================
+
+@app.post("/tasks/{taskid}/comments")
+async def add_task_comment(
+    taskid: str,
+    comment: str = Form(...),
+    userid: str = Form(...)
+):
+    """Add comment to task and send notifications"""
+    try:
+        # Get current task
+        task = Mongo.Tasks.find_one({"_id": ObjectId(taskid)})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Create comment object
+        comment_obj = {
+            "id": str(uuid.uuid4()),
+            "text": comment,
+            "userId": userid,
+            "timestamp": datetime.now().isoformat(),
+            "userName": ""  # Will be populated from user data
+        }
+        
+        # Get user name
+        user = Mongo.Users.find_one({"_id": ObjectId(userid)})
+        if user:
+            comment_obj["userName"] = user.get("name", "Unknown User")
+        
+        # Add comment to task
+        Mongo.Tasks.update_one(
+            {"_id": ObjectId(taskid)},
+            {"$push": {"comments": comment_obj}}
+        )
+        
+        # Send notifications
+        task_title = task.get("task", "Task")
+        task_userid = task.get("userid")
+        
+        # Get commenter name
+        commenter = Mongo.Users.find_one({"_id": ObjectId(userid)})
+        commenter_name = commenter.get("name", "Team Member") if commenter else "Team Member"
+        
+        # Notify task owner if comment is by someone else
+        if task_userid and userid != task_userid:
+            Mongo.create_notification(
+                userid=task_userid,
+                title="New Comment Added",
+                message=f"{commenter_name} added a comment to your task '{task_title}': '{comment[:100]}{'...' if len(comment) > 100 else ''}'",
+                notification_type="task",
+                priority="medium",
+                action_url=Mongo.get_role_based_action_url(task_userid, "task"),
+                related_id=taskid,
+                metadata={
+                    "task_title": task_title,
+                    "action": "Comment Added",
+                    "comment_text": comment,
+                    "commented_by": userid
+                }
+            )
+        
+        # Notify manager if they exist and didn't make the comment
+        assigned_by = task.get("assigned_by")
+        if assigned_by and assigned_by != "self" and assigned_by != userid and assigned_by != task_userid:
+            Mongo.create_notification(
+                userid=assigned_by,
+                title="Comment Added to Assigned Task",
+                message=f"{commenter_name} added a comment to the task '{task_title}': '{comment[:100]}{'...' if len(comment) > 100 else ''}'",
+                notification_type="task",
+                priority="medium",
+                action_url=Mongo.get_role_based_action_url(assigned_by, "manager_task"),
+                related_id=taskid,
+                metadata={
+                    "task_title": task_title,
+                    "action": "Comment Added",
+                    "comment_text": comment,
+                    "commented_by": userid
+                }
+            )
+        
+        return {"message": "Comment added successfully", "comment_id": comment_obj["id"]}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/{taskid}/subtasks")
+async def add_task_subtask(
+    taskid: str,
+    subtask_text: str = Form(...),
+    assigned_by: str = Form(...)
+):
+    """Add subtask to task and send notifications"""
+    try:
+        # Get current task
+        task = Mongo.Tasks.find_one({"_id": ObjectId(taskid)})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Create subtask object
+        subtask_obj = {
+            "id": int(datetime.now().timestamp()),
+            "text": subtask_text,
+            "completed": False,
+            "assignedBy": assigned_by,
+            "createdAt": datetime.now().isoformat()
+        }
+        
+        # Add subtask to task
+        Mongo.Tasks.update_one(
+            {"_id": ObjectId(taskid)},
+            {"$push": {"subtasks": subtask_obj}}
+        )
+        
+        # Send notifications
+        task_title = task.get("task", "Task")
+        task_userid = task.get("userid")
+        
+        # Get assigner name
+        assigner = Mongo.Users.find_one({"_id": ObjectId(assigned_by)}) if ObjectId.is_valid(assigned_by) else None
+        assigner_name = assigner.get("name", "Manager") if assigner else "Manager"
+        
+        if task_userid:
+            Mongo.create_notification(
+                userid=task_userid,
+                title="Subtask Added",
+                message=f"{assigner_name} added a new subtask '{subtask_text}' to your task '{task_title}'.",
+                notification_type="task",
+                priority="medium",
+                action_url=Mongo.get_role_based_action_url(task_userid, "task"),
+                related_id=taskid,
+                metadata={
+                    "task_title": task_title,
+                    "action": "Subtask Added",
+                    "subtask_text": subtask_text,
+                    "assigned_by": assigned_by
+                }
+            )
+        
+        return {"message": "Subtask added successfully", "subtask_id": subtask_obj["id"]}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/test-notifications/{taskid}")
+async def test_task_notifications(taskid: str):
+    """Test all task notification types for a specific task"""
+    try:
+        # Get task
+        task = Mongo.Tasks.find_one({"_id": ObjectId(taskid)})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        userid = task.get("userid")
+        task_title = task.get("task", "Test Task")
+        
+        notifications_sent = []
+        
+        # Test different notification types
+        
+        # 1. Task Creation Notification
+        notification_id = Mongo.create_notification(
+            userid=userid,
+            title="Task Created Successfully",
+            message=f"Your task '{task_title}' has been created successfully.",
+            notification_type="task",
+            priority="medium",
+            action_url=Mongo.get_role_based_action_url(userid, "task"),
+            related_id=taskid,
+            metadata={"task_title": task_title, "action": "Created"}
+        )
+        notifications_sent.append({"type": "creation", "id": notification_id})
+        
+        # 2. Task Update Notification
+        notification_id = Mongo.create_notification(
+            userid=userid,
+            title="Task Updated",
+            message=f"Your task '{task_title}' has been updated. Changes: status to In Progress, priority to High",
+            notification_type="task",
+            priority="medium",
+            action_url=Mongo.get_role_based_action_url(userid, "task"),
+            related_id=taskid,
+            metadata={"task_title": task_title, "action": "Updated", "changes": {"status": "In Progress", "priority": "High"}}
+        )
+        notifications_sent.append({"type": "update", "id": notification_id})
+        
+        # 3. Comment Notification
+        notification_id = Mongo.create_notification(
+            userid=userid,
+            title="New Comment Added",
+            message=f"Test User added a comment to your task '{task_title}': 'This is a test comment for notification testing'",
+            notification_type="task",
+            priority="medium",
+            action_url=Mongo.get_role_based_action_url(userid, "task"),
+            related_id=taskid,
+            metadata={"task_title": task_title, "action": "Comment Added", "comment_text": "This is a test comment for notification testing"}
+        )
+        notifications_sent.append({"type": "comment", "id": notification_id})
+        
+        # 4. File Upload Notification
+        notification_id = Mongo.create_notification(
+            userid=userid,
+            title="File Uploaded",
+            message=f"Test User uploaded a file 'test_document.pdf' to your task '{task_title}'.",
+            notification_type="task",
+            priority="medium",
+            action_url=Mongo.get_role_based_action_url(userid, "task"),
+            related_id=taskid,
+            metadata={"task_title": task_title, "action": "File Uploaded", "filename": "test_document.pdf"}
+        )
+        notifications_sent.append({"type": "file_upload", "id": notification_id})
+        
+        # 5. Status Change Notification
+        notification_id = Mongo.create_notification(
+            userid=userid,
+            title="Task Status Updated",
+            message=f"Your task '{task_title}' status has been changed from 'Not completed' to 'Completed'.",
+            notification_type="task",
+            priority="high",
+            action_url=Mongo.get_role_based_action_url(userid, "task"),
+            related_id=taskid,
+            metadata={"task_title": task_title, "action": "Status Changed", "old_status": "Not completed", "new_status": "Completed"}
+        )
+        notifications_sent.append({"type": "status_change", "id": notification_id})
+        
+        # 6. Deadline Approach Notification (due tomorrow)
+        notification_id = Mongo.create_notification(
+            userid=userid,
+            title="Task Deadline Approaching",
+            message=f"Your task '{task_title}' is due tomorrow. Please ensure it's completed on time.",
+            notification_type="task",
+            priority="high",
+            action_url=Mongo.get_role_based_action_url(userid, "task"),
+            related_id=taskid,
+            metadata={"task_title": task_title, "action": "Deadline Approaching", "days_remaining": 1}
+        )
+        notifications_sent.append({"type": "deadline_approach", "id": notification_id})
+        
+        # 7. Overdue Task Notification
+        notification_id = Mongo.create_notification(
+            userid=userid,
+            title="Task Overdue",
+            message=f"Your task '{task_title}' is 2 days overdue. This requires immediate attention.",
+            notification_type="task",
+            priority="critical",
+            action_url=Mongo.get_role_based_action_url(userid, "task"),
+            related_id=taskid,
+            metadata={"task_title": task_title, "action": "Overdue", "days_overdue": 2}
+        )
+        notifications_sent.append({"type": "overdue", "id": notification_id})
+        
+        # 8. Test Hierarchy-based Task Completion Notifications
+        # Check if user is manager or employee and test appropriate notification path
+        user = Mongo.Users.find_one({"_id": ObjectId(userid)})
+        if user:
+            user_name = user.get("name", "Test User")
+            assigned_by_id = task.get("assigned_by")
+            
+            # Test the enhanced task completion notification
+            completion_notification_ids = await Mongo.create_task_completion_notification(
+                assignee_id=userid,
+                manager_id=assigned_by_id,
+                task_title=task_title,
+                assignee_name=user_name,
+                task_id=taskid
+            )
+            
+            if completion_notification_ids:
+                for notif_id in completion_notification_ids:
+                    notifications_sent.append({"type": "hierarchy_completion", "id": notif_id})
+        
+        return {
+            "message": "All task notification types tested successfully (including enhanced hierarchy-based completion)",
+            "task_id": taskid,
+            "task_title": task_title,
+            "notifications_sent": notifications_sent,
+            "total_notifications": len(notifications_sent)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/trigger-deadline-reminders")
+async def trigger_deadline_reminders():
+    """Manually trigger deadline reminder checks"""
+    try:
+        import asyncio
+        from notification_automation import check_upcoming_deadlines, check_and_notify_overdue_tasks
+        
+        # Check upcoming deadlines
+        upcoming_result = await check_upcoming_deadlines()
+        
+        # Check overdue tasks
+        overdue_result = await check_and_notify_overdue_tasks()
+        
+        return {
+            "message": "Deadline reminder checks completed",
+            "upcoming_deadlines": upcoming_result,
+            "overdue_tasks": overdue_result,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tasks/{taskid}/notification-history")
+async def get_task_notification_history(taskid: str):
+    """Get notification history for a specific task"""
+    try:
+        # Get all notifications related to this task
+        notifications = list(Mongo.Notifications.find({
+            "related_id": taskid,
+            "notification_type": "task"
+        }).sort("created_at", -1).limit(50))
+        
+        # Convert ObjectId to string for JSON serialization
+        for notification in notifications:
+            notification["_id"] = str(notification["_id"])
+            if "created_at" in notification and isinstance(notification["created_at"], datetime):
+                notification["created_at"] = notification["created_at"].isoformat()
+        
+        return {
+            "task_id": taskid,
+            "notification_count": len(notifications),
+            "notifications": notifications
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tasks/notification-summary")
+async def get_task_notification_summary():
+    """Get summary of all task-related notifications"""
+    try:
+        # Get notification counts by type
+        pipeline = [
+            {"$match": {"notification_type": "task"}},
+            {"$group": {
+                "_id": "$metadata.action",
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"count": -1}}
+        ]
+        
+        action_counts = list(Mongo.Notifications.aggregate(pipeline))
+        
+        # Get recent notifications
+        recent_notifications = list(Mongo.Notifications.find({
+            "notification_type": "task"
+        }).sort("created_at", -1).limit(20))
+        
+        # Convert ObjectId to string
+        for notification in recent_notifications:
+            notification["_id"] = str(notification["_id"])
+            if "created_at" in notification and isinstance(notification["created_at"], datetime):
+                notification["created_at"] = notification["created_at"].isoformat()
+        
+        return {
+            "total_task_notifications": sum(item["count"] for item in action_counts),
+            "action_breakdown": action_counts,
+            "recent_notifications": recent_notifications,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/test-simple-notification/{userid}")
+async def test_simple_notification(userid: str):
+    """Create a simple test notification to verify the system is working"""
+    try:
+        # Create a simple notification
+        notification_id = Mongo.create_notification(
+            userid=userid,
+            title="🔔 Test Notification",
+            message="This is a test notification to verify the system is working correctly.",
+            notification_type="system",
+            priority="medium",
+            metadata={"test": True}
+        )
+        
+        # Try to send via WebSocket
+        try:
+            from websocket_manager import notification_manager
+            await notification_manager.send_personal_notification(userid, {
+                "_id": notification_id,
+                "title": "🔔 Test Notification", 
+                "message": "This is a test notification to verify the system is working correctly.",
+                "type": "system",
+                "priority": "medium",
+                "timestamp": datetime.now().isoformat()
+            })
+            websocket_sent = True
+        except Exception as ws_error:
+            print(f"WebSocket error: {ws_error}")
+            websocket_sent = False
+        
+        return {
+            "success": True,
+            "notification_id": notification_id,
+            "userid": userid,
+            "websocket_sent": websocket_sent,
+            "message": "Test notification created successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/debug-notifications/{userid}")
+async def debug_notifications(userid: str):
+    """Debug notification system for a specific user"""
+    try:
+        from websocket_manager import notification_manager
+        
+        # Check database notifications
+        db_notifications = list(Mongo.Notifications.find({"userid": userid}).sort("created_at", -1).limit(10))
+        for notification in db_notifications:
+            notification["_id"] = str(notification["_id"])
+            if "created_at" in notification and isinstance(notification["created_at"], datetime):
+                notification["created_at"] = notification["created_at"].isoformat()
+        
+        # Check WebSocket connections
+        is_connected = userid in notification_manager.active_connections
+        connection_count = notification_manager.get_user_connection_count(userid)
+        
+        # Get user info
+        user = Mongo.Users.find_one({"_id": ObjectId(userid)}) if ObjectId.is_valid(userid) else None
+        user_name = user.get("name", "Unknown") if user else "User not found"
+        
+        return {
+            "userid": userid,
+            "user_name": user_name,
+            "user_exists": user is not None,
+            "websocket_connected": is_connected,
+            "connection_count": connection_count,
+            "active_users": notification_manager.get_active_users(),
+            "total_db_notifications": len(db_notifications),
+            "recent_notifications": db_notifications,
+            "unread_count": Mongo.get_unread_notification_count(userid)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
